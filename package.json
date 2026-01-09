@@ -1,0 +1,14 @@
+{
+  "name": "dropship-automation",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "up": "docker compose up --build",
+    "down": "docker compose down -v"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2"
+  }
+}
