@@ -1,57 +1,39 @@
 import { z } from "zod";
 
 /**
- * Schema de variáveis de ambiente
- * - Centraliza validação
- * - Evita crash silencioso em produção
- * - Compatível com Render, Docker e local
+ * Runtime environment validation
+ * This file is the single source of truth for env vars
  */
-const envSchema = z.object({
-  /* =========================
-     Core
-  ========================= */
-  NODE_ENV: z
-    .enum(["development", "test", "production"])
-    .default("development"),
+
+const EnvSchema = z.object({
+  NODE_ENV: z.enum(["test", "development", "production"]).default("development"),
 
   PORT: z.coerce.number().default(3000),
 
   BASE_URL: z.string().url(),
 
-  /* =========================
-     Shopify
-  ========================= */
-  SHOPIFY_API_KEY: z.string(),
-  SHOPIFY_API_SECRET: z.string(),
+  // === Database ===
+  DATABASE_URL: z.string().min(1),
 
-  // Scopes separados por vírgula
-  SHOPIFY_SCOPES: z.string(),
+  // === Shopify ===
+  SHOPIFY_API_KEY: z.string().min(1),
+  SHOPIFY_API_SECRET: z.string().min(1),
+  SHOPIFY_SCOPES: z.string().min(1),
+  SHOPIFY_API_VERSION: z.string().min(1),
 
-  // ✅ CORREÇÃO DO ERRO
-  // Usado no shopify.ts
-  SHOPIFY_API_VERSION: z.string().default("2024-10"),
-
-  /* =========================
-     Redis (opcional, mas preparado)
-  ========================= */
+  // === Optional / Infra ===
   REDIS_URL: z.string().optional(),
 
-  /* =========================
-     Observabilidade / Debug
-  ========================= */
-  LOG_LEVEL: z
-    .enum(["debug", "info", "warn", "error"])
-    .default("info"),
+  LOG_LEVEL: z.enum(["error", "warn", "info", "debug"]).default("info"),
 });
 
-/**
- * Parse seguro do process.env
- * Se faltar algo obrigatório → crash controlado no boot
- */
-export const env = envSchema.parse(process.env);
+const parsed = EnvSchema.safeParse(process.env);
 
-/**
- * Tipo inferido automaticamente
- * Garante autocomplete e segurança no código
- */
-export type Env = z.infer<typeof envSchema>;
+if (!parsed.success) {
+  console.error("❌ Invalid environment variables:");
+  console.error(parsed.error.format());
+  process.exit(1);
+}
+
+export const env = parsed.data;
+export type Env = typeof env;
