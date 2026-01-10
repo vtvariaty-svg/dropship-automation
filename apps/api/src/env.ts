@@ -1,44 +1,57 @@
-type Env = {
-  NODE_ENV: string;
-  PORT: number;
+import { z } from "zod";
 
-  BASE_URL: string;
+/**
+ * Schema de variáveis de ambiente
+ * - Centraliza validação
+ * - Evita crash silencioso em produção
+ * - Compatível com Render, Docker e local
+ */
+const envSchema = z.object({
+  /* =========================
+     Core
+  ========================= */
+  NODE_ENV: z
+    .enum(["development", "test", "production"])
+    .default("development"),
 
-  DATABASE_URL: string;
-  REDIS_URL: string;
+  PORT: z.coerce.number().default(3000),
 
-  // Shopify OAuth
-  SHOPIFY_CLIENT_ID: string;
-  SHOPIFY_CLIENT_SECRET: string;
-  SHOPIFY_SCOPES: string;
-};
+  BASE_URL: z.string().url(),
 
-function must(name: keyof Env, fallback?: any) {
-  const v = process.env[name as string] ?? fallback;
-  if (v === undefined || v === null || v === "") {
-    throw new Error(`Missing env var: ${String(name)}`);
-  }
-  return v as any;
-}
+  /* =========================
+     Shopify
+  ========================= */
+  SHOPIFY_API_KEY: z.string(),
+  SHOPIFY_API_SECRET: z.string(),
 
-export const env: Env = {
-  NODE_ENV: String(process.env.NODE_ENV ?? "development"),
-  PORT: Number(process.env.PORT ?? 3000),
+  // Scopes separados por vírgula
+  SHOPIFY_SCOPES: z.string(),
 
-  BASE_URL: String(must("BASE_URL", "http://localhost:3000")),
+  // ✅ CORREÇÃO DO ERRO
+  // Usado no shopify.ts
+  SHOPIFY_API_VERSION: z.string().default("2024-10"),
 
-  DATABASE_URL: String(must("DATABASE_URL")),
-  REDIS_URL: String(must("REDIS_URL")),
+  /* =========================
+     Redis (opcional, mas preparado)
+  ========================= */
+  REDIS_URL: z.string().optional(),
 
-  SHOPIFY_CLIENT_ID: String(must("SHOPIFY_CLIENT_ID")),
-  SHOPIFY_CLIENT_SECRET: String(must("SHOPIFY_CLIENT_SECRET")),
-  SHOPIFY_SCOPES: String(must("SHOPIFY_SCOPES", "read_products,write_products,read_orders,write_orders")),
-   SHOPIFY_API_VERSION: z.string().default("2024-10"),
-  }
+  /* =========================
+     Observabilidade / Debug
+  ========================= */
+  LOG_LEVEL: z
+    .enum(["debug", "info", "warn", "error"])
+    .default("info"),
+});
 
-  .parse(process.env);
+/**
+ * Parse seguro do process.env
+ * Se faltar algo obrigatório → crash controlado no boot
+ */
+export const env = envSchema.parse(process.env);
 
-export type Env = z.infer<typeof env>;
-
-
-
+/**
+ * Tipo inferido automaticamente
+ * Garante autocomplete e segurança no código
+ */
+export type Env = z.infer<typeof envSchema>;
