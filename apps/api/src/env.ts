@@ -33,4 +33,12 @@ export const env: Env = {
   SHOPIFY_CLIENT_ID: String(must("SHOPIFY_CLIENT_ID")),
   SHOPIFY_CLIENT_SECRET: String(must("SHOPIFY_CLIENT_SECRET")),
   SHOPIFY_SCOPES: String(must("SHOPIFY_SCOPES", "read_products,write_products,read_orders,write_orders")),
-};
+   SHOPIFY_API_VERSION: z.string().default("2024-10"),
+  }
+
+  .parse(process.env);
+
+export type Env = z.infer<typeof env>;
+
+
+
