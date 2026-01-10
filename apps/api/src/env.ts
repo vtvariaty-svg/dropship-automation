@@ -1,75 +1,77 @@
+// apps/api/src/env.ts
 import { z } from "zod";
 
-/**
- * Single source of truth for env vars
- * Supports BOTH naming conventions:
- * - SHOPIFY_API_KEY / SHOPIFY_API_SECRET (preferred)
- * - SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET (legacy/alternate)
- */
-
-const EnvSchema = z
-  .object({
-    NODE_ENV: z.enum(["test", "development", "production"]).default("development"),
-    PORT: z.coerce.number().default(3000),
-
-    BASE_URL: z.string().url(),
-
-    // === Database ===
-    DATABASE_URL: z.string().min(1),
-
-    // === Shopify (two naming styles) ===
-    SHOPIFY_API_KEY: z.string().optional(),
-    SHOPIFY_API_SECRET: z.string().optional(),
-
-    SHOPIFY_CLIENT_ID: z.string().optional(),
-    SHOPIFY_CLIENT_SECRET: z.string().optional(),
-
-    SHOPIFY_SCOPES: z.string().min(1),
-    SHOPIFY_API_VERSION: z.string().min(1),
-
-    // === Optional / Infra ===
-    REDIS_URL: z.string().optional(),
-
-    LOG_LEVEL: z.enum(["error", "warn", "info", "debug"]).default("info"),
-  })
-  .superRefine((val, ctx) => {
-    const hasApiPair = !!(val.SHOPIFY_API_KEY && val.SHOPIFY_API_SECRET);
-    const hasClientPair = !!(val.SHOPIFY_CLIENT_ID && val.SHOPIFY_CLIENT_SECRET);
-
-    if (!hasApiPair && !hasClientPair) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["SHOPIFY_API_KEY"],
-        message:
-          "Missing Shopify credentials. Provide either (SHOPIFY_API_KEY & SHOPIFY_API_SECRET) OR (SHOPIFY_CLIENT_ID & SHOPIFY_CLIENT_SECRET).",
-      });
-    }
-  });
-
-const parsed = EnvSchema.safeParse(process.env);
-
-if (!parsed.success) {
-  console.error("❌ Invalid environment variables:");
-  console.error(parsed.error.format());
-  process.exit(1);
+function normalizeBaseUrl(u: string) {
+  return u.replace(/\/+$/, "");
 }
 
-const data = parsed.data;
+const schema = z.object({
+  NODE_ENV: z.enum(["test", "development", "production"]).default("development"),
+  PORT: z.coerce.number().int().positive().default(3000),
 
-// Resolve aliases so the rest of the code can use either name safely
-const resolvedShopifyClientId = data.SHOPIFY_CLIENT_ID ?? data.SHOPIFY_API_KEY!;
-const resolvedShopifyClientSecret =
-  data.SHOPIFY_CLIENT_SECRET ?? data.SHOPIFY_API_SECRET!;
+  // URL pública do seu backend (Render)
+  BASE_URL: z
+    .string()
+    .min(1)
+    .refine((v) => /^https?:\/\//i.test(v), "BASE_URL must start with http:// or https://")
+    .transform(normalizeBaseUrl),
 
-export const env = {
-  ...data,
+  // Banco
+  DATABASE_URL: z.string().min(1),
 
-  // Ensure both styles exist for type-safety across the codebase
-  SHOPIFY_CLIENT_ID: resolvedShopifyClientId,
-  SHOPIFY_CLIENT_SECRET: resolvedShopifyClientSecret,
+  // Opcional (só se você for usar filas/worker)
+  REDIS_URL: z.string().min(1).optional(),
 
-  SHOPIFY_API_KEY: data.SHOPIFY_API_KEY ?? resolvedShopifyClientId,
-  SHOPIFY_API_SECRET: data.SHOPIFY_API_SECRET ?? resolvedShopifyClientSecret,
-} as const;
+  LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 
-export type Env = typeof env;
+  // Shopify (vamos aceitar os 2 nomes: API_KEY/SECRET e CLIENT_ID/SECRET)
+  SHOPIFY_API_KEY: z.string().min(1),
+  SHOPIFY_API_SECRET: z.string().min(1),
+  SHOPIFY_CLIENT_ID: z.string().min(1),
+  SHOPIFY_CLIENT_SECRET: z.string().min(1),
+
+  SHOPIFY_SCOPES: z
+    .string()
+    .min(1)
+    .default("read_products,write_products,read_orders,write_orders"),
+
+  // Versão da Admin API (string)
+  SHOPIFY_API_VERSION: z.string().min(1).default("2024-10"),
+});
+
+const raw = {
+  NODE_ENV: process.env.NODE_ENV,
+  PORT: process.env.PORT,
+
+  // Render normalmente não cria BASE_URL sozinho, então permitimos aliases:
+  BASE_URL:
+    process.env.BASE_URL ??
+    process.env.PUBLIC_BASE_URL ??
+    process.env.RENDER_EXTERNAL_URL ??
+    process.env.RENDER_PUBLIC_URL,
+
+  DATABASE_URL: process.env.DATABASE_URL,
+  REDIS_URL: process.env.REDIS_URL,
+  LOG_LEVEL: process.env.LOG_LEVEL,
+
+  // Aliases (porque no Shopify "API key" == "client_id" e "API secret" == "client_secret")
+  SHOPIFY_API_KEY: process.env.SHOPIFY_API_KEY ?? process.env.SHOPIFY_CLIENT_ID,
+  SHOPIFY_API_SECRET: process.env.SHOPIFY_API_SECRET ?? process.env.SHOPIFY_CLIENT_SECRET,
+
+  SHOPIFY_CLIENT_ID: process.env.SHOPIFY_CLIENT_ID ?? process.env.SHOPIFY_API_KEY,
+  SHOPIFY_CLIENT_SECRET: process.env.SHOPIFY_CLIENT_SECRET ?? process.env.SHOPIFY_API_SECRET,
+
+  SHOPIFY_SCOPES: process.env.SHOPIFY_SCOPES,
+  SHOPIFY_API_VERSION: process.env.SHOPIFY_API_VERSION,
+};
+
+const parsed = schema.safeParse(raw);
+
+if (!parsed.success) {
+  // mensagem bem clara no log do Render
+  const details = parsed.error.flatten().fieldErrors;
+  throw new Error(`Invalid environment variables:\n${JSON.stringify(details, null, 2)}`);
+}
+
+export type Env = z.infer<typeof schema>;
+export const env: Env = parsed.data;
