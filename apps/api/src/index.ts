@@ -7,6 +7,8 @@ import { healthRoutes } from "./routes/health";
 import { statusRoutes } from "./routes/status";
 import { runRoutes } from "./routes/run";
 import { shopifyRoutes } from "./routes/shopify";
+import { rootRoutes } from "./routes/root";
+
 
 async function main() {
   const app = Fastify({ logger: true });
@@ -15,6 +17,7 @@ async function main() {
   await app.register(cookie);
 
   // routes
+  await app.register(rootRoutes);
   await app.register(healthRoutes);
   await app.register(statusRoutes);
   await app.register(runRoutes);
