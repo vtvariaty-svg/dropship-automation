@@ -1,74 +1,94 @@
 // apps/api/src/env.ts
-// Loader de variáveis de ambiente simples, seguro e compatível com Render + Shopify
 
-export type LogLevel = "error" | "warn" | "info" | "debug";
+type NodeEnv = "development" | "production" | "test";
 
-export type Env = {
-  NODE_ENV: "test" | "development" | "production";
-  PORT: number;
-
-  // URLs
-  BASE_URL: string;
-  PUBLIC_WEB_BASE_URL?: string;
-
-  // Infra
-  DATABASE_URL: string;
-  REDIS_URL?: string;
-
-  // Shopify
-  SHOPIFY_CLIENT_ID: string;
-  SHOPIFY_CLIENT_SECRET: string;
-  SHOPIFY_SCOPES: string;
-  SHOPIFY_API_VERSION: string;
-  SHOPIFY_REDIRECT_URI: string;
-
-  // Logs
-  LOG_LEVEL: LogLevel;
-};
-
-// helpers
-function required(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`Missing required environment variable: ${name}`);
+function pickEnv(...names: string[]): string | undefined {
+  for (const n of names) {
+    const v = process.env[n];
+    if (typeof v === "string" && v.trim().length > 0) return v.trim();
   }
-  return value;
+  return undefined;
 }
 
-function numberEnv(name: string, defaultValue: number): number {
-  const value = process.env[name];
-  if (!value) return defaultValue;
-
-  const parsed = Number(value);
-  if (Number.isNaN(parsed)) {
-    throw new Error(`Environment variable ${name} must be a number`);
+function required(name: string, ...aliases: string[]): string {
+  const v = pickEnv(name, ...aliases);
+  if (!v) {
+    const all = [name, ...aliases].join(" | ");
+    throw new Error(`Missing required environment variable: ${all}`);
   }
-  return parsed;
+  return v;
 }
 
-// ===============================
-// EXPORT FINAL DO ENV
-// ===============================
-export const env: Env = {
-  NODE_ENV: (process.env.NODE_ENV as Env["NODE_ENV"]) ?? "development",
+function optional(name: string, ...aliases: string[]): string | undefined {
+  return pickEnv(name, ...aliases);
+}
 
-  PORT: numberEnv("PORT", 3000),
+function normalizeBaseUrl(url: string): string {
+  // remove trailing slash
+  return url.replace(/\/+$/, "");
+}
 
-  // URLs
-  BASE_URL: required("BASE_URL"),
-  PUBLIC_WEB_BASE_URL: process.env.PUBLIC_WEB_BASE_URL,
+function parsePort(value: string | undefined, fallback = 10000): number {
+  const n = Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(n) ? n : fallback;
+}
 
-  // Infra
-  DATABASE_URL: required("DATABASE_URL"),
-  REDIS_URL: process.env.REDIS_URL,
+// --- required / derived values ---
 
-  // Shopify
-  SHOPIFY_CLIENT_ID: required("SHOPIFY_CLIENT_ID"),
-  SHOPIFY_CLIENT_SECRET: required("SHOPIFY_CLIENT_SECRET"),
-  SHOPIFY_SCOPES: required("SHOPIFY_SCOPES"),
-  SHOPIFY_API_VERSION: required("SHOPIFY_API_VERSION"),
-  SHOPIFY_REDIRECT_URI: required("SHOPIFY_REDIRECT_URI"),
+// Prefer BASE_URL, but accept common alternatives on Render
+const BASE_URL = normalizeBaseUrl(
+  required("BASE_URL", "PUBLIC_WEB_BASE_URL", "RENDER_EXTERNAL_URL")
+);
 
-  // Logs
-  LOG_LEVEL: (process.env.LOG_LEVEL as LogLevel) ?? "info",
-};
+// Shopify credentials: support both naming styles
+const SHOPIFY_CLIENT_ID = required("SHOPIFY_CLIENT_ID", "SHOPIFY_API_KEY");
+const SHOPIFY_CLIENT_SECRET = required(
+  "SHOPIFY_CLIENT_SECRET",
+  "SHOPIFY_API_SECRET",
+  "SHOPIFY_API_SECRET_KEY"
+);
+
+// Scopes + version (provide sane defaults if missing)
+const SHOPIFY_SCOPES =
+  optional("SHOPIFY_SCOPES") ?? "read_products,write_products";
+
+const SHOPIFY_API_VERSION =
+  optional("SHOPIFY_API_VERSION") ?? "2024-10";
+
+// Redirect URI:
+// If not set, derive from BASE_URL (recommended) => `${BASE_URL}/shopify/callback`
+// Also accept common alias names.
+const SHOPIFY_REDIRECT_URI =
+  optional("SHOPIFY_REDIRECT_URI", "SHOPIFY_REDIRECT_URL", "SHOPIFY_CALLBACK_URL") ??
+  `${BASE_URL}/shopify/callback`;
+
+// DB must exist
+const DATABASE_URL = required("DATABASE_URL");
+
+// Redis is optional
+const REDIS_URL = optional("REDIS_URL");
+
+// Node env + port
+const NODE_ENV = (optional("NODE_ENV") ?? "production") as NodeEnv;
+const PORT = parsePort(process.env.PORT, 10000);
+
+// Public web base url (optional)
+const PUBLIC_WEB_BASE_URL = optional("PUBLIC_WEB_BASE_URL") ?? BASE_URL;
+
+export const env = {
+  NODE_ENV,
+  PORT,
+  BASE_URL,
+  PUBLIC_WEB_BASE_URL,
+
+  DATABASE_URL,
+  REDIS_URL,
+
+  SHOPIFY_CLIENT_ID,
+  SHOPIFY_CLIENT_SECRET,
+  SHOPIFY_SCOPES,
+  SHOPIFY_API_VERSION,
+  SHOPIFY_REDIRECT_URI,
+} as const;
+
+export type Env = typeof env;
