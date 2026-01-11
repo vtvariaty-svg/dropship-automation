@@ -1,98 +1,58 @@
-import type { FastifyInstance } from "fastify";
-import { env } from "../env";
+import { FastifyInstance } from 'fastify';
 import {
-  buildAuthorizeUrl,
-  exchangeCodeForToken,
-  normalizeShop,
-  randomState,
-  validateHmac,
-} from "../integrations/shopify/oauth";
+  beginOAuth,
+  handleOAuthCallback,
+} from '../integrations/shopify/oauth';
+import { env } from '../env';
 
-/**
- * Rotas Shopify:
- * - GET /shopify/install?shop=cliquebuydev.myshopify.com
- * - GET /shopify/callback
- */
 export async function shopifyRoutes(app: FastifyInstance) {
-  // sanity
-  app.get("/shopify", async () => {
+  /**
+   * Health check específico do Shopify
+   */
+  app.get('/shopify', async () => {
     return {
       ok: true,
-      message: "Shopify routes online",
-      baseUrl: env.BASE_URL,
-      redirectUri: env.SHOPIFY_REDIRECT_URI,
-      scopes: env.SHOPIFY_SCOPES,
-      apiVersion: env.SHOPIFY_API_VERSION,
+      service: 'shopify',
+      status: 'ready',
     };
   });
 
   /**
-   * Inicia instalação (redireciona pro Shopify /oauth/authorize)
+   * Início da instalação do app
+   * GET /shopify/install?shop=loja.myshopify.com
    */
-  app.get("/shopify/install", async (req, reply) => {
-    const q = req.query as { shop?: string };
+  app.get('/shopify/install', async (req, reply) => {
+    const { shop } = req.query as { shop?: string };
 
-    if (!q?.shop) {
+    if (!shop) {
       reply.code(400);
-      return { ok: false, error: "Missing query param: shop" };
+      return { error: 'Missing shop parameter' };
     }
 
-    const shop = normalizeShop(q.shop);
-    const state = randomState();
+    const redirectUrl = beginOAuth(shop);
 
-    const authorizeUrl = buildAuthorizeUrl({
-      shop,
-      state,
-      scopes: env.SHOPIFY_SCOPES,
-      redirectUri: env.SHOPIFY_REDIRECT_URI,
-    });
-
-    // Se você tiver cookie plugin no Fastify, dá pra salvar state em cookie.
-    // Como não vou assumir plugin, a gente só envia state junto e valida HMAC no callback.
-    return reply.redirect(authorizeUrl);
+    reply.redirect(redirectUrl);
   });
 
   /**
-   * Callback do Shopify (valida HMAC + troca code por token)
+   * Callback OAuth
+   * GET /shopify/callback
    */
-  app.get("/shopify/callback", async (req, reply) => {
-    const query = req.query as Record<string, any>;
+  app.get('/shopify/callback', async (req, reply) => {
+    try {
+      const result = await handleOAuthCallback(req);
 
-    const shop = String(query.shop ?? "");
-    const code = String(query.code ?? "");
-
-    if (!shop || !code) {
+      // após instalar, redireciona para app ou status
+      reply.redirect(
+        `${env.PUBLIC_WEB_BASE_URL}/status?shop=${result.shop}`,
+      );
+    } catch (err: any) {
+      req.log.error(err);
       reply.code(400);
-      return { ok: false, error: "Missing shop or code in callback" };
+      return {
+        ok: false,
+        error: err.message ?? 'OAuth failed',
+      };
     }
-
-    // valida HMAC
-    const ok = validateHmac(query);
-    if (!ok) {
-      reply.code(401);
-      return { ok: false, error: "Invalid HMAC" };
-    }
-
-    const normalizedShop = normalizeShop(shop);
-
-    // troca code por token
-    const token = await exchangeCodeForToken({
-      shop: normalizedShop,
-      code,
-    });
-
-    /**
-     * Aqui é onde você vai plugar o "Shop Context Loader":
-     * - salvar/atualizar token por shop no banco
-     * - criar tenant/shop record
-     *
-     * Por enquanto, retorna sucesso (pra você confirmar fluxo).
-     */
-    return {
-      ok: true,
-      shop: normalizedShop,
-      scope: token.scope,
-      message: "OAuth success. Token received (store it in DB next).",
-    };
   });
 }
