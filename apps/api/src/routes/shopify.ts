@@ -1,160 +1,137 @@
+// apps/api/src/routes/shopify.ts
 import type { FastifyInstance } from "fastify";
+import crypto from "node:crypto";
+
 import { env } from "../env";
-import { q } from "../db/pool";
-import { randomState, verifyHmac, buildInstallUrl } from "../integrations/shopify/oauth";
-import { exchangeCodeForToken } from "../integrations/shopify/token";
-import { upsertShopifyConnection } from "../integrations/shopify/store";
+import {
+  buildInstallUrl,
+  normalizeShop,
+  validateHmac,
+  exchangeCodeForToken,
+} from "../integrations/shopify/oauth";
+import { upsertShopConnection } from "../integrations/shopify/store";
 
-const TENANT_ID = 1;
+type ShopifyAuthQuery = {
+  shop?: string;
+};
 
-/** Aceita apenas *.myshopify.com (dev store). */
-function normalizeShop(raw: string) {
-  const shop = String(raw ?? "").trim().toLowerCase();
-  if (!shop) return null;
-  // padrão Shopify: subdomínio + .myshopify.com
-  const ok = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(shop);
-  return ok ? shop : null;
+type ShopifyCallbackQuery = {
+  shop?: string;
+  code?: string;
+  state?: string;
+  hmac?: string;
+  host?: string;
+  timestamp?: string;
+};
+
+function generateState(): string {
+  return crypto.randomBytes(16).toString("hex");
 }
 
-/**
- * SHOP CONTEXT LOADER
- * - extrai shop
- * - puxa token salvo no Postgres
- * - retorna contexto mínimo para chamadas Admin API
- */
-async function loadShopContext(req: any) {
-  const qy = (req.query ?? {}) as any;
-
-  // prioridade: query ?shop=
-  const shop = normalizeShop(qy.shop ?? "");
-  if (!shop) {
-    throw Object.assign(new Error("Missing/invalid shop. Use ?shop=*.myshopify.com"), {
-      statusCode: 400,
-    });
-  }
-
-  // IMPORTANTE:
-  // Este SELECT assume que seu migration criou a tabela `shopify_connections`
-  // com coluna `shop` e `access_token`.
-  // Isso é coerente com `upsertShopifyConnection()`.
-  const rows = await q<any>(
-    `SELECT tenant_id, shop, access_token, scope, refresh_token, expires_at
-     FROM shopify_connections
-     WHERE shop=$1
-     ORDER BY tenant_id ASC
-     LIMIT 1`,
-    [shop]
-  );
-
-  const row = rows[0];
-  if (!row?.access_token) {
-    throw Object.assign(new Error("Shop not connected (missing access_token). Run /shopify/auth first."), {
-      statusCode: 401,
-    });
-  }
-
-  return {
-    tenantId: Number(row.tenant_id ?? TENANT_ID),
-    shop: String(row.shop),
-    accessToken: String(row.access_token),
-    scope: String(row.scope ?? ""),
-    expiresAt: row.expires_at ? new Date(row.expires_at) : null,
-  };
+function badRequest(reply: any, message: string) {
+  return reply.code(400).send({ ok: false, error: message });
 }
 
-/** Client simples para Admin API (GraphQL). */
-async function shopifyGraphQL(opts: { shop: string; accessToken: string; query: string; variables?: any }) {
-  const apiVersion = (env.SHOPIFY_API_VERSION ?? "2024-10").trim();
-  const url = `https://${opts.shop}/admin/api/${apiVersion}/graphql.json`;
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Shopify-Access-Token": opts.accessToken,
-    },
-    body: JSON.stringify({ query: opts.query, variables: opts.variables ?? {} }),
-  });
-
-  const json = await res.json().catch(() => null);
-
-  if (!res.ok) {
-    const msg =
-      json?.errors?.[0]?.message ||
-      json?.error ||
-      `Shopify GraphQL error (HTTP ${res.status})`;
-    throw Object.assign(new Error(msg), { statusCode: 502, details: json });
-  }
-
-  if (json?.errors?.length) {
-    throw Object.assign(new Error(json.errors[0]?.message ?? "Shopify GraphQL error"), {
-      statusCode: 502,
-      details: json,
-    });
-  }
-
-  return json;
+function getNormalizedShop(rawShop?: string): string | null {
+  if (!rawShop) return null;
+  const shop = normalizeShop(rawShop);
+  return shop ?? null;
 }
 
 export async function shopifyRoutes(app: FastifyInstance) {
   /**
-   * OAuth start
-   * GET /shopify/auth?shop=xxx.myshopify.com
+   * ✅ NEW: /shopify/install
+   * Alias para /shopify/auth (muito comum em tutoriais).
+   * Você pode usar:
+   *   /shopify/install?shop=cliquebuydev.myshopify.com
    */
-  app.get("/shopify/auth", async (req, reply) => {
-    const shop = normalizeShop(String((req.query as any).shop ?? ""));
+  app.get("/shopify/install", async (request, reply) => {
+    const q = request.query as ShopifyAuthQuery;
+    const shop = getNormalizedShop(q.shop);
+
     if (!shop) {
-      return reply.code(400).send({ ok: false, error: "Invalid shop. Use *.myshopify.com" });
+      return badRequest(
+        reply,
+        "Missing or invalid `shop`. Example: /shopify/install?shop=your-store.myshopify.com"
+      );
     }
 
-    const state = randomState();
-
-    reply.setCookie("shopify_oauth_state", state, {
-      httpOnly: true,
-      sameSite: "lax",
-      path: "/",
-    });
-
-    // Render base
-    const redirectUri = `${env.BASE_URL}/shopify/callback`;
-    const url = buildInstallUrl({ shop, state, redirectUri });
-
-    return reply.redirect(url);
+    // Reaproveita o mesmo fluxo do /shopify/auth
+    return reply.redirect(`/shopify/auth?shop=${encodeURIComponent(shop)}`);
   });
 
   /**
-   * OAuth callback
-   * GET /shopify/callback?shop=&code=&hmac=&state=&host=&timestamp=
+   * /shopify/auth
+   * Inicia o OAuth (redireciona para Shopify).
    */
-  app.get("/shopify/callback", async (req, reply) => {
-    const qy = req.query as any;
+  app.get("/shopify/auth", async (request, reply) => {
+    const q = request.query as ShopifyAuthQuery;
+    const shop = getNormalizedShop(q.shop);
 
-    // Se o usuário abrir essa URL "na mão", não terá query => invalid hmac.
-    if (!verifyHmac(qy)) {
-      return reply.code(400).send({ ok: false, error: "Invalid HMAC" });
+    if (!shop) {
+      return badRequest(
+        reply,
+        "Missing or invalid `shop`. Example: /shopify/auth?shop=your-store.myshopify.com"
+      );
     }
 
-    const shop = normalizeShop(String(qy.shop ?? ""));
-    const code = String(qy.code ?? "");
-    const state = String(qy.state ?? "");
-    const host = String(qy.host ?? "");
+    const state = generateState();
 
-    if (!shop || !code) {
-      return reply.code(400).send({ ok: false, error: "Missing shop/code" });
+    // Cookie de estado para validar no callback
+    reply.setCookie("shopify_oauth_state", state, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "lax",
+      path: "/",
+      maxAge: 60 * 10, // 10 min
+    });
+
+    const installUrl = buildInstallUrl(shop, {
+      state,
+      redirectUri: env.SHOPIFY_REDIRECT_URI,
+    });
+
+    return reply.redirect(installUrl);
+  });
+
+  /**
+   * /shopify/callback
+   * Shopify retorna aqui com code + hmac + state.
+   */
+  app.get("/shopify/callback", async (request, reply) => {
+    const q = request.query as ShopifyCallbackQuery;
+
+    const shop = getNormalizedShop(q.shop);
+    if (!shop) return badRequest(reply, "Missing or invalid `shop`.");
+
+    if (!q.code) return badRequest(reply, "Missing `code`.");
+    if (!q.state) return badRequest(reply, "Missing `state`.");
+
+    const stateCookie = (request.cookies as any)?.shopify_oauth_state;
+    if (!stateCookie || stateCookie !== q.state) {
+      return reply.code(401).send({ ok: false, error: "Invalid state" });
     }
 
-    const cookieState = (req.cookies as any).shopify_oauth_state;
-    if (!cookieState || cookieState !== state) {
-      return reply.code(400).send({ ok: false, error: "Invalid state" });
+    // Valida HMAC (segurança do callback)
+    const ok = validateHmac(q as any, env.SHOPIFY_CLIENT_SECRET);
+    if (!ok) {
+      return reply.code(401).send({ ok: false, error: "Invalid HMAC" });
     }
 
-    const tok = await exchangeCodeForToken({ shop, code });
+    // Troca code por access_token
+    const tok = await exchangeCodeForToken({
+      shop,
+      code: q.code,
+      redirectUri: env.SHOPIFY_REDIRECT_URI,
+    });
 
     const expiresAt =
-      typeof tok.expires_in === "number" ? new Date(Date.now() + tok.expires_in * 1000) : null;
+      tok.expires_in && Number.isFinite(tok.expires_in)
+        ? new Date(Date.now() + tok.expires_in * 1000)
+        : null;
 
-    await upsertShopifyConnection({
-      tenantId: TENANT_ID,
+    // Salva conexão da loja (DB)
+    await upsertShopConnection({
       shop,
       scope: tok.scope ?? env.SHOPIFY_SCOPES,
       accessToken: tok.access_token,
@@ -162,54 +139,27 @@ export async function shopifyRoutes(app: FastifyInstance) {
       expiresAt,
     });
 
-    // ✅ IMPORTANTE:
-    // Para não ficar exibindo JSON dentro do Admin, redirecionamos para "/"
-    // preservando shop/host/embedded.
-    const redirect = `/?shop=${encodeURIComponent(shop)}&host=${encodeURIComponent(host)}&embedded=1`;
-    return reply.redirect(redirect);
-  });
+    // Limpa cookie state
+    reply.setCookie("shopify_oauth_state", "", {
+      httpOnly: true,
+      secure: true,
+      sameSite: "lax",
+      path: "/",
+      maxAge: 0,
+    });
 
-  /**
-   * ✅ Primeiro endpoint real usando Shop Context Loader:
-   * GET /shopify/products?shop=xxx.myshopify.com
-   */
-  app.get("/shopify/products", async (req, reply) => {
-    try {
-      const ctx = await loadShopContext(req);
-
-      const query = `
-        query Products($first: Int!) {
-          products(first: $first) {
-            nodes {
-              id
-              title
-              handle
-              status
-              totalInventory
-            }
-          }
-        }
-      `;
-
-      const data = await shopifyGraphQL({
-        shop: ctx.shop,
-        accessToken: ctx.accessToken,
-        query,
-        variables: { first: 20 },
-      });
-
-      return reply.send({
-        ok: true,
-        shop: ctx.shop,
-        products: data.data?.products?.nodes ?? [],
-      });
-    } catch (err: any) {
-      const code = Number(err?.statusCode ?? 500);
-      return reply.code(code).send({
-        ok: false,
-        error: err?.message ?? "Unknown error",
-        details: err?.details ?? null,
-      });
-    }
+    /**
+     * Aqui você pode:
+     * 1) retornar JSON (dev)
+     * 2) ou redirecionar pro seu frontend/admin
+     *
+     * Por enquanto mantive JSON, que é o que você já estava usando.
+     */
+    return reply.send({
+      ok: true,
+      shop,
+      scope: tok.scope ?? env.SHOPIFY_SCOPES,
+      message: "Shopify connected",
+    });
   });
 }
