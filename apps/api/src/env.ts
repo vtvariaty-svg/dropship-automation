@@ -1,108 +1,112 @@
 // apps/api/src/env.ts
-/* eslint-disable no-console */
+// Env loader sem zod: simples, tipado e com defaults seguros para Render/Shopify.
+
+export type LogLevel = "error" | "warn" | "info" | "debug";
 
 export type Env = {
-  NODE_ENV: "development" | "production" | "test";
+  NODE_ENV: "test" | "development" | "production";
   PORT: number;
 
-  // Base/public URL of this API (used for redirects, webhooks, etc.)
+  // URL pública do backend (Render)
   BASE_URL: string;
 
-  // Infra
+  // Banco/Cache
   DATABASE_URL: string;
-  REDIS_URL: string;
+  REDIS_URL?: string;
 
-  // Shopify (support both naming styles)
+  // Shopify
   SHOPIFY_CLIENT_ID: string;
   SHOPIFY_CLIENT_SECRET: string;
-
-  // Some parts of the codebase may use API_KEY / API_SECRET naming
-  SHOPIFY_API_KEY: string;
-  SHOPIFY_API_SECRET: string;
-
   SHOPIFY_SCOPES: string;
   SHOPIFY_API_VERSION: string;
-
-  // OAuth redirect URI (must match exactly what you set in Shopify app)
   SHOPIFY_REDIRECT_URI: string;
 
-  // Optional (nice to have)
-  LOG_LEVEL: "debug" | "info" | "warn" | "error";
+  // Logs
+  LOG_LEVEL: LogLevel;
 };
 
-function read(name: string): string | undefined {
+function must(name: string): string {
   const v = process.env[name];
-  if (v === undefined) return undefined;
-  const t = String(v).trim();
-  return t.length ? t : undefined;
+  if (!v || !String(v).trim()) {
+    throw new Error(`Missing env var: ${name}`);
+  }
+  return String(v).trim();
 }
 
-function must(name: string, fallback?: string): string {
-  const v = read(name) ?? fallback;
-  if (!v) throw new Error(`Missing env var: ${name}`);
-  return v;
+function optional(name: string): string | undefined {
+  const v = process.env[name];
+  const s = v ? String(v).trim() : "";
+  return s ? s : undefined;
 }
 
-function mustInt(name: string, fallback?: number): number {
-  const raw = read(name);
-  const val = raw ? Number(raw) : fallback;
-  if (!Number.isFinite(val)) throw new Error(`Invalid number env var: ${name}`);
-  return val;
+function asNodeEnv(v: string): Env["NODE_ENV"] {
+  if (v === "test" || v === "development" || v === "production") return v;
+  // se vier algo estranho no Render, cai em production por segurança
+  return "production";
 }
 
-function stripTrailingSlash(url: string): string {
-  return url.endsWith("/") ? url.slice(0, -1) : url;
+function intFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw || !String(raw).trim()) return fallback;
+
+  const n = Number(String(raw).trim());
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new Error(`Invalid env var: ${name} (expected positive number, got "${raw}")`);
+  }
+  return Math.floor(n);
 }
 
-const NODE_ENV = (read("NODE_ENV") ?? "development") as Env["NODE_ENV"];
-const PORT = mustInt("PORT", 3000);
+// --------- build do env ---------
+const NODE_ENV = asNodeEnv(process.env.NODE_ENV ?? "development");
 
-// Prefer BASE_URL, but allow common Render fallback envs
-const inferredBaseUrl =
-  read("BASE_URL") ||
-  read("PUBLIC_WEB_BASE_URL") ||
-  read("RENDER_EXTERNAL_URL") ||
-  `http://localhost:${PORT}`;
+// Render sempre injeta PORT (na maioria dos casos), mas no local pode não ter.
+const PORT = intFromEnv("PORT", 3000);
 
-const BASE_URL = stripTrailingSlash(inferredBaseUrl);
+// BASE_URL precisa existir (é o host público do Render)
+// Ex: https://cliquebuy-automation-api.onrender.com
+const BASE_URL =
+  optional("BASE_URL") ??
+  // compat opcional caso você use esse nome
+  optional("PUBLIC_WEB_BASE_URL");
 
-// Shopify credentials (accept either style)
-const SHOPIFY_CLIENT_ID = must("SHOPIFY_CLIENT_ID", read("SHOPIFY_API_KEY"));
-const SHOPIFY_CLIENT_SECRET = must(
-  "SHOPIFY_CLIENT_SECRET",
-  read("SHOPIFY_API_SECRET")
-);
+if (!BASE_URL) {
+  // erro bem claro no log do Render
+  throw new Error(
+    `Invalid environment variables:\n{\n  "BASE_URL": { "_errors": ["Invalid input: expected string, received undefined"] }\n}\n` +
+      `Dica: defina BASE_URL no Render (ex: https://seu-servico.onrender.com)`
+  );
+}
 
-// Mirror into API_KEY/SECRET so other modules keep working
-const SHOPIFY_API_KEY = SHOPIFY_CLIENT_ID;
-const SHOPIFY_API_SECRET = SHOPIFY_CLIENT_SECRET;
+const DATABASE_URL = must("DATABASE_URL");
+const REDIS_URL = optional("REDIS_URL");
 
-const SHOPIFY_SCOPES = must(
-  "SHOPIFY_SCOPES",
-  "read_products,write_products"
-);
+// Shopify: aceita os dois estilos (CLIENT_* novo e API_* antigo)
+const SHOPIFY_CLIENT_ID = optional("SHOPIFY_CLIENT_ID") ?? optional("SHOPIFY_API_KEY");
+if (!SHOPIFY_CLIENT_ID) throw new Error(`Missing env var: SHOPIFY_CLIENT_ID (or SHOPIFY_API_KEY)`);
 
-const SHOPIFY_API_VERSION = must("SHOPIFY_API_VERSION", "2024-10");
+const SHOPIFY_CLIENT_SECRET =
+  optional("SHOPIFY_CLIENT_SECRET") ?? optional("SHOPIFY_API_SECRET") ?? optional("SHOPIFY_API_SECRET_KEY");
+if (!SHOPIFY_CLIENT_SECRET) throw new Error(`Missing env var: SHOPIFY_CLIENT_SECRET (or SHOPIFY_API_SECRET)`);
 
-// Default redirect uri to BASE_URL + /shopify/callback if not provided
-const SHOPIFY_REDIRECT_URI = stripTrailingSlash(
-  must("SHOPIFY_REDIRECT_URI", `${BASE_URL}/shopify/callback`)
-);
+const SHOPIFY_SCOPES = optional("SHOPIFY_SCOPES") ?? "read_products,write_products";
+const SHOPIFY_API_VERSION = optional("SHOPIFY_API_VERSION") ?? "2024-10";
 
-const LOG_LEVEL = (read("LOG_LEVEL") ?? "info") as Env["LOG_LEVEL"];
+// Se não setar, monta automaticamente
+const SHOPIFY_REDIRECT_URI =
+  optional("SHOPIFY_REDIRECT_URI") ?? `${BASE_URL.replace(/\/+$/, "")}/shopify/callback`;
 
+const LOG_LEVEL = (optional("LOG_LEVEL") as LogLevel) ?? "info";
+
+// Export final tipado (PORT sempre number)
 export const env: Env = {
   NODE_ENV,
   PORT,
   BASE_URL,
-  DATABASE_URL: must("DATABASE_URL"),
-  REDIS_URL: must("REDIS_URL"),
+  DATABASE_URL,
+  REDIS_URL,
 
   SHOPIFY_CLIENT_ID,
   SHOPIFY_CLIENT_SECRET,
-  SHOPIFY_API_KEY,
-  SHOPIFY_API_SECRET,
-
   SHOPIFY_SCOPES,
   SHOPIFY_API_VERSION,
   SHOPIFY_REDIRECT_URI,
