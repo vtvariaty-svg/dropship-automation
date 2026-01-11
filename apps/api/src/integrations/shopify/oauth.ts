@@ -1,92 +1,56 @@
-import crypto from 'crypto';
-import { FastifyRequest } from 'fastify';
-import { env } from '../../env';
-import { upsertShopConnection } from './store';
+// apps/api/src/integrations/shopify/oauth.ts
+import crypto from "node:crypto";
+import { env } from "../../env";
 
-/**
- * Gera URL de instalação do app Shopify
- */
-export function beginOAuth(shop: string): string {
-  const state = crypto.randomBytes(16).toString('hex');
+export function normalizeShop(input: string): string {
+  const shop = String(input || "").trim().toLowerCase();
 
-  const params = new URLSearchParams({
-    client_id: env.SHOPIFY_CLIENT_ID,
-    scope: env.SHOPIFY_SCOPES,
-    redirect_uri: env.SHOPIFY_REDIRECT_URI,
-    state,
-    response_type: 'code',
-  });
+  // aceita "minhaloja" e vira "minhaloja.myshopify.com"
+  if (shop && !shop.includes(".")) return `${shop}.myshopify.com`;
 
-  return `https://${shop}/admin/oauth/authorize?${params.toString()}`;
+  return shop;
 }
 
-/**
- * Processa callback OAuth do Shopify
- */
-export async function handleOAuthCallback(req: FastifyRequest) {
-  const query = req.query as Record<string, string>;
-
-  const { shop, hmac, code, state } = query;
-
-  if (!shop || !hmac || !code || !state) {
-    throw new Error('Missing required OAuth parameters');
-  }
-
-  validateHmac(query);
-
-  // troca code por access token
-  const tokenResponse = await fetch(
-    `https://${shop}/admin/oauth/access_token`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        client_id: env.SHOPIFY_CLIENT_ID,
-        client_secret: env.SHOPIFY_CLIENT_SECRET,
-        code,
-      }),
-    },
-  );
-
-  if (!tokenResponse.ok) {
-    throw new Error('Failed to exchange code for token');
-  }
-
-  const data = await tokenResponse.json();
-
-  const accessToken = data.access_token as string;
-
-  if (!accessToken) {
-    throw new Error('Invalid access token response');
-  }
-
-  // salva ou atualiza loja no banco
-  await upsertShopConnection({
-    shop,
-    accessToken,
-    scopes: env.SHOPIFY_SCOPES,
-  });
-
-  return { shop };
+export function validateShopParam(shop: string): void {
+  // Shopify recomenda validar domínio .myshopify.com
+  // Ex: cliqueuydev.myshopify.com
+  const ok = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i.test(shop);
+  if (!ok) throw new Error(`Invalid shop param: ${shop}`);
 }
 
-/**
- * Validação HMAC oficial Shopify
- */
-function validateHmac(query: Record<string, string>) {
-  const { hmac, ...rest } = query;
+export function randomState(len = 16): string {
+  return crypto.randomBytes(len).toString("hex");
+}
+
+export function verifyHmac(query: Record<string, any>, secret: string): boolean {
+  // Shopify HMAC: remove hmac e signature, ordena e cria querystring
+  const { hmac, signature, ...rest } = query || {};
+  if (!hmac) return false;
 
   const message = Object.keys(rest)
     .sort()
-    .map((key) => `${key}=${rest[key]}`)
-    .join('&');
+    .map((k) => `${k}=${Array.isArray(rest[k]) ? rest[k].join(",") : rest[k]}`)
+    .join("&");
 
-  const digest = crypto
-    .createHmac('sha256', env.SHOPIFY_CLIENT_SECRET)
-    .update(message)
-    .digest('hex');
+  const digest = crypto.createHmac("sha256", secret).update(message).digest("hex");
+  return crypto.timingSafeEqual(Buffer.from(digest, "utf8"), Buffer.from(String(hmac), "utf8"));
+}
 
-  if (digest !== hmac) {
-    throw new Error('Invalid HMAC validation');
-  }
+export function buildInstallUrl(shopRaw: string, state: string): string {
+  const shop = normalizeShop(shopRaw);
+  validateShopParam(shop);
+
+  const url = new URL(`https://${shop}/admin/oauth/authorize`);
+  url.searchParams.set("client_id", env.SHOPIFY_CLIENT_ID);
+  url.searchParams.set("scope", env.SHOPIFY_SCOPES);
+  url.searchParams.set("redirect_uri", env.SHOPIFY_REDIRECT_URI);
+  url.searchParams.set("state", state);
+  url.searchParams.set("grant_options[]", "per-user"); // opcional, mas ok
+  return url.toString();
+}
+
+export function adminGraphQLEndpoint(shopRaw: string): string {
+  const shop = normalizeShop(shopRaw);
+  validateShopParam(shop);
+  return `https://${shop}/admin/api/${env.SHOPIFY_API_VERSION}/graphql.json`;
 }

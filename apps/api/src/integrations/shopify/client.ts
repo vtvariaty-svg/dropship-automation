@@ -1,25 +1,39 @@
-import { adminGraphQLEndpoint } from "./oauth";
+// apps/api/src/integrations/shopify/client.ts
+import { env } from "../../env";
+import { normalizeShop, validateShopParam } from "./oauth";
 
-export async function shopifyGraphQL<T>(params: {
-  shop: string;
-  accessToken: string;
-  query: string;
-  variables?: any;
-}): Promise<T> {
-  const res = await fetch(adminGraphQLEndpoint(params.shop), {
+export type ShopifyGraphQLResponse<T> = {
+  data?: T;
+  errors?: Array<{ message: string; extensions?: any }>;
+};
+
+function endpoint(shopRaw: string): string {
+  const shop = normalizeShop(shopRaw);
+  validateShopParam(shop);
+  return `https://${shop}/admin/api/${env.SHOPIFY_API_VERSION}/graphql.json`;
+}
+
+export async function shopifyGraphql<T>(
+  shop: string,
+  accessToken: string,
+  query: string,
+  variables?: Record<string, any>
+): Promise<ShopifyGraphQLResponse<T>> {
+  const res = await fetch(endpoint(shop), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-Shopify-Access-Token": params.accessToken,
+      "X-Shopify-Access-Token": accessToken,
     },
-    body: JSON.stringify({ query: params.query, variables: params.variables }),
+    body: JSON.stringify({ query, variables: variables ?? {} }),
   });
 
-  const text = await res.text();
-  if (!res.ok) throw new Error(`Shopify GraphQL failed: ${res.status} ${text}`);
+  const json = (await res.json()) as ShopifyGraphQLResponse<T>;
 
-  const json = JSON.parse(text);
-  if (json.errors) throw new Error(`Shopify GraphQL errors: ${JSON.stringify(json.errors)}`);
+  if (!res.ok) {
+    const msg = json?.errors?.[0]?.message ?? `HTTP ${res.status}`;
+    throw new Error(`Shopify GraphQL error: ${msg}`);
+  }
 
-  return json.data as T;
+  return json;
 }
