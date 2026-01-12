@@ -4,6 +4,10 @@ import { env } from "./env";
 import { shopifyRoutes } from "./routes/shopify";
 import { contextDebugRoutes } from "./routes/contextDebug";
 import { loadShopContext } from "./integrations/shopify/context";
+import { shopifyAdminTestRoutes } from "./routes/shopifyAdminTest";
+
+
+
 
 async function bootstrap() {
   const app = Fastify({ logger: true });
@@ -36,6 +40,7 @@ async function bootstrap() {
 
   await app.register(shopifyRoutes);
   await app.register(contextDebugRoutes);
+  await app.register(shopifyAdminTestRoutes);
 
   await app.listen({
     port: env.PORT,
