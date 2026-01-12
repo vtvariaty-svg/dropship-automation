@@ -5,18 +5,41 @@ export type ShopContext = {
   accessToken: string;
 };
 
+function normalizeShop(input: string): string {
+  // remove espaços e força lowercase
+  let s = (input ?? "").toString().trim().toLowerCase();
+
+  // se vier URL, extrai host
+  // ex: https://cliquebuy-dev.myshopify.com/admin -> cliquebuy-dev.myshopify.com
+  try {
+    if (s.startsWith("http://") || s.startsWith("https://")) {
+      s = new URL(s).host.toLowerCase();
+    }
+  } catch {
+    // ignore
+  }
+
+  // remove barra final se vier como host/
+  s = s.replace(/\/+$/, "");
+
+  return s;
+}
+
 export async function loadShopContext(shop: string): Promise<ShopContext> {
+  const normalized = normalizeShop(shop);
+
   const result = await pool.query(
     `
     select shop, access_token
     from shopify_oauth
-    where shop = $1
+    where lower(shop) = lower($1)
+    limit 1
   `,
-    [shop]
+    [normalized]
   );
 
   if (result.rowCount === 0) {
-    throw new Error("Shop not connected");
+    throw new Error(`Shop not connected: ${normalized}`);
   }
 
   return {
