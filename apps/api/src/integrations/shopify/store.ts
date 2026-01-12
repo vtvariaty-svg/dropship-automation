@@ -1,23 +1,23 @@
-import { pool } from "../db/pool";
+import { pool } from "../../db/pool";
 
-export async function saveShopToken(params: {
+export async function upsertShopifyConnection(params: {
   shop: string;
   accessToken: string;
-  scope: string;
+  scopes: string;
 }) {
-  const { shop, accessToken, scope } = params;
+  const { shop, accessToken, scopes } = params;
 
   await pool.query(
     `
-    insert into shopify_stores (shop, access_token, scope, updated_at)
-    values ($1, $2, $3, now())
+    insert into shopify_oauth (shop, access_token, scopes)
+    values ($1, $2, $3)
     on conflict (shop)
     do update set
       access_token = excluded.access_token,
-      scope = excluded.scope,
+      scopes = excluded.scopes,
       updated_at = now()
   `,
-    [shop, accessToken, scope]
+    [shop, accessToken, scopes]
   );
 
   return { shop, connected: true };

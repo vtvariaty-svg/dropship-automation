@@ -27,12 +27,12 @@ export async function publishProductToShopify(params: {
     },
   };
 
-  const data = await shopifyGraphQL<any>({
-    shop: params.shop,
-    accessToken: params.accessToken,
-    query: mutation,
-    variables,
-  });
+  const data = await shopifyGraphQL<any>(
+    params.shop,
+    params.accessToken,
+    mutation,
+    variables
+  );
 
   const errs = data.productCreate?.userErrors ?? [];
   if (errs.length) throw new Error(`Shopify userErrors: ${JSON.stringify(errs)}`);
