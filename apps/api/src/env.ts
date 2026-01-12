@@ -1,73 +1,36 @@
-// apps/api/src/env.ts
-export type Env = {
-  NODE_ENV: "development" | "production" | "test";
-  PORT: number;
+import { z } from "zod";
 
-  // Base do seu backend (Render)
-  BASE_URL: string;
+const schema = z.object({
+  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
 
-  // Base pública do web (se usar frontend separado)
-  PUBLIC_WEB_BASE_URL?: string;
+  // Render pode fornecer PORT como string
+  PORT: z.coerce.number().default(3000),
 
-  DATABASE_URL: string;
-  REDIS_URL?: string;
+  // Base pública do backend (ex: https://cliquebuy-automation-api.onrender.com)
+  BASE_URL: z.string().min(1),
 
-  // Shopify
-  SHOPIFY_CLIENT_ID: string;
-  SHOPIFY_CLIENT_SECRET: string;
-  SHOPIFY_SCOPES: string;
-  SHOPIFY_API_VERSION: string;
-  SHOPIFY_REDIRECT_URI: string;
+  // Opcional: base do web (se você tiver frontend). Pode ser igual ao BASE_URL.
+  PUBLIC_WEB_BASE_URL: z.string().optional(),
 
-  // opcional
-  LOG_LEVEL?: "debug" | "info" | "warn" | "error";
-};
+  DATABASE_URL: z.string().min(1),
 
-function required(name: string): string {
-  const v = process.env[name];
-  if (!v || String(v).trim() === "") {
-    throw new Error(`Missing required environment variable: ${name}`);
-  }
-  return String(v);
+  // Opcional
+  REDIS_URL: z.string().optional(),
+
+  // Shopify (nomes "recomendados" que você está usando no Render)
+  SHOPIFY_CLIENT_ID: z.string().min(1),
+  SHOPIFY_CLIENT_SECRET: z.string().min(1),
+  SHOPIFY_SCOPES: z.string().min(1),
+  SHOPIFY_API_VERSION: z.string().min(1),
+  SHOPIFY_REDIRECT_URI: z.string().min(1),
+});
+
+const parsed = schema.safeParse(process.env);
+
+if (!parsed.success) {
+  const details = parsed.error.flatten().fieldErrors;
+  throw new Error(`Invalid environment variables:\n${JSON.stringify(details, null, 2)}`);
 }
 
-function optional(name: string): string | undefined {
-  const v = process.env[name];
-  if (!v || String(v).trim() === "") return undefined;
-  return String(v);
-}
-
-function numberWithDefault(name: string, def: number): number {
-  const v = optional(name);
-  if (!v) return def;
-  const n = Number(v);
-  if (Number.isNaN(n)) throw new Error(`Invalid number for env var ${name}: ${v}`);
-  return n;
-}
-
-function envEnum<T extends string>(name: string, allowed: readonly T[], def: T): T {
-  const v = (optional(name) ?? def) as T;
-  if (!allowed.includes(v)) {
-    throw new Error(`Invalid ${name}: ${v}. Allowed: ${allowed.join(", ")}`);
-  }
-  return v;
-}
-
-export const env: Env = {
-  NODE_ENV: envEnum("NODE_ENV", ["development", "production", "test"] as const, "development"),
-  PORT: numberWithDefault("PORT", 3000),
-
-  BASE_URL: required("BASE_URL"),
-  PUBLIC_WEB_BASE_URL: optional("PUBLIC_WEB_BASE_URL"),
-
-  DATABASE_URL: required("DATABASE_URL"),
-  REDIS_URL: optional("REDIS_URL"),
-
-  SHOPIFY_CLIENT_ID: required("SHOPIFY_CLIENT_ID"),
-  SHOPIFY_CLIENT_SECRET: required("SHOPIFY_CLIENT_SECRET"),
-  SHOPIFY_SCOPES: optional("SHOPIFY_SCOPES") ?? "read_products,write_products",
-  SHOPIFY_API_VERSION: optional("SHOPIFY_API_VERSION") ?? "2024-10",
-  SHOPIFY_REDIRECT_URI: required("SHOPIFY_REDIRECT_URI"),
-
-  LOG_LEVEL: (optional("LOG_LEVEL") as Env["LOG_LEVEL"]) ?? undefined,
-};
+export type Env = z.infer<typeof schema>;
+export const env: Env = parsed.data;

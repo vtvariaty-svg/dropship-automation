@@ -1,56 +1,76 @@
-// apps/api/src/integrations/shopify/oauth.ts
-import crypto from "node:crypto";
+import crypto from "crypto";
 import { env } from "../../env";
 
-export function normalizeShop(input: string): string {
-  const shop = String(input || "").trim().toLowerCase();
-
-  // aceita "minhaloja" e vira "minhaloja.myshopify.com"
-  if (shop && !shop.includes(".")) return `${shop}.myshopify.com`;
-
-  return shop;
+export function randomState(bytes = 16): string {
+  return crypto.randomBytes(bytes).toString("hex");
 }
 
-export function validateShopParam(shop: string): void {
-  // Shopify recomenda validar domínio .myshopify.com
-  // Ex: cliqueuydev.myshopify.com
-  const ok = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i.test(shop);
-  if (!ok) throw new Error(`Invalid shop param: ${shop}`);
+// Admin GraphQL endpoint do shop (para uso no client.ts)
+export function adminGraphQLEndpoint(shop: string): string {
+  return `https://${shop}/admin/api/${env.SHOPIFY_API_VERSION}/graphql.json`;
 }
 
-export function randomState(len = 16): string {
-  return crypto.randomBytes(len).toString("hex");
+export function buildInstallUrl(args: { shop: string; state: string }): string {
+  const { shop, state } = args;
+
+  const params = new URLSearchParams({
+    client_id: env.SHOPIFY_CLIENT_ID,
+    scope: env.SHOPIFY_SCOPES,
+    redirect_uri: env.SHOPIFY_REDIRECT_URI,
+    state,
+  });
+
+  return `https://${shop}/admin/oauth/authorize?${params.toString()}`;
 }
 
-export function verifyHmac(query: Record<string, any>, secret: string): boolean {
-  // Shopify HMAC: remove hmac e signature, ordena e cria querystring
-  const { hmac, signature, ...rest } = query || {};
+// Validação HMAC do Shopify (querystring assinado)
+export function validateHmac(query: Record<string, unknown>): boolean {
+  const hmac = String(query.hmac ?? "");
   if (!hmac) return false;
 
-  const message = Object.keys(rest)
-    .sort()
-    .map((k) => `${k}=${Array.isArray(rest[k]) ? rest[k].join(",") : rest[k]}`)
-    .join("&");
+  // Shopify recomenda remover hmac e signature antes de assinar
+  const entries: [string, string][] = Object.entries(query)
+    .filter(([k]) => k !== "hmac" && k !== "signature")
+    .map(([k, v]) => [k, String(v)])
+    .sort(([a], [b]) => a.localeCompare(b));
 
-  const digest = crypto.createHmac("sha256", secret).update(message).digest("hex");
-  return crypto.timingSafeEqual(Buffer.from(digest, "utf8"), Buffer.from(String(hmac), "utf8"));
+  const message = entries.map(([k, v]) => `${k}=${v}`).join("&");
+
+  const digest = crypto
+    .createHmac("sha256", env.SHOPIFY_CLIENT_SECRET)
+    .update(message)
+    .digest("hex");
+
+  // comparação segura
+  const a = Buffer.from(digest, "utf8");
+  const b = Buffer.from(hmac, "utf8");
+  if (a.length !== b.length) return false;
+
+  return crypto.timingSafeEqual(a, b);
 }
 
-export function buildInstallUrl(shopRaw: string, state: string): string {
-  const shop = normalizeShop(shopRaw);
-  validateShopParam(shop);
+export async function exchangeCodeForToken(args: {
+  shop: string;
+  code: string;
+}): Promise<{ access_token: string; scope?: string }> {
+  const { shop, code } = args;
 
-  const url = new URL(`https://${shop}/admin/oauth/authorize`);
-  url.searchParams.set("client_id", env.SHOPIFY_CLIENT_ID);
-  url.searchParams.set("scope", env.SHOPIFY_SCOPES);
-  url.searchParams.set("redirect_uri", env.SHOPIFY_REDIRECT_URI);
-  url.searchParams.set("state", state);
-  url.searchParams.set("grant_options[]", "per-user"); // opcional, mas ok
-  return url.toString();
-}
+  const url = `https://${shop}/admin/oauth/access_token`;
 
-export function adminGraphQLEndpoint(shopRaw: string): string {
-  const shop = normalizeShop(shopRaw);
-  validateShopParam(shop);
-  return `https://${shop}/admin/api/${env.SHOPIFY_API_VERSION}/graphql.json`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      client_id: env.SHOPIFY_CLIENT_ID,
+      client_secret: env.SHOPIFY_CLIENT_SECRET,
+      code,
+    }),
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`Shopify token exchange failed (${resp.status}): ${text}`);
+  }
+
+  return (await resp.json()) as { access_token: string; scope?: string };
 }

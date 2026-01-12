@@ -1,76 +1,65 @@
-// apps/api/src/routes/shopify.ts
 import type { FastifyInstance } from "fastify";
-import { env } from "../env";
-import { buildInstallUrl, normalizeShop, randomState, verifyHmac, validateShopParam } from "../integrations/shopify/oauth";
-import { exchangeCodeForToken } from "../integrations/shopify/token";
-import { upsertShopifyConnection } from "../integrations/shopify/store";
+import { buildInstallUrl, exchangeCodeForToken, randomState, validateHmac } from "../integrations/shopify/oauth";
+
+function requireQueryString(query: any, key: string): string {
+  const v = query?.[key];
+  if (!v || typeof v !== "string") throw new Error(`Missing or invalid query param: ${key}`);
+  return v;
+}
 
 export async function shopifyRoutes(app: FastifyInstance) {
-  // Health simples
-  app.get("/shopify", async () => ({ ok: true, route: "/shopify" }));
-
-  // ✅ Compat: seu teste manual foi /shopify/install?shop=...
+  // Inicia instalação
   app.get("/shopify/install", async (req, reply) => {
-    const q = req.query as any;
-    const shop = normalizeShop(q.shop);
-    validateShopParam(shop);
+    try {
+      const shop = requireQueryString(req.query, "shop");
 
-    const state = randomState();
-    // Se quiser: salvar state em cookie/sessão. Por enquanto, simples:
-    reply.setCookie("shopify_state", state, { path: "/", httpOnly: true, sameSite: "lax", secure: env.NODE_ENV === "production" });
+      const state = randomState(16);
+      // cookie pro callback validar state (se você quiser validar depois)
+      reply.setCookie("shopify_oauth_state", state, {
+        path: "/",
+        httpOnly: true,
+        sameSite: "lax",
+        secure: true,
+      });
 
-    const url = buildInstallUrl(shop, state);
-    return reply.redirect(url);
+      const url = buildInstallUrl({ shop, state });
+      return reply.status(302).redirect(url);
+    } catch (err: any) {
+      req.log.error(err);
+      return reply.status(400).send({ ok: false, error: err?.message ?? "Bad Request" });
+    }
   });
 
-  // Mantém também /shopify/auth
-  app.get("/shopify/auth", async (req, reply) => {
-    const q = req.query as any;
-    const shop = normalizeShop(q.shop);
-    validateShopParam(shop);
-
-    const state = randomState();
-    reply.setCookie("shopify_state", state, { path: "/", httpOnly: true, sameSite: "lax", secure: env.NODE_ENV === "production" });
-
-    const url = buildInstallUrl(shop, state);
-    return reply.redirect(url);
-  });
-
-  // Callback do OAuth
+  // Callback OAuth
   app.get("/shopify/callback", async (req, reply) => {
-    const q = req.query as any;
+    try {
+      const shop = requireQueryString(req.query, "shop");
+      const code = requireQueryString(req.query, "code");
 
-    // 1) valida shop
-    const shop = normalizeShop(q.shop);
-    validateShopParam(shop);
+      // (Opcional) validar state contra cookie
+      // const state = requireQueryString(req.query, "state");
+      // const cookieState = (req.cookies as any)?.shopify_oauth_state;
+      // if (!cookieState || cookieState !== state) throw new Error("Invalid OAuth state");
 
-    // 2) valida state (cookie)
-    const stateCookie = (req.cookies as any)?.shopify_state;
-    if (!stateCookie || String(stateCookie) !== String(q.state)) {
-      return reply.code(401).send({ ok: false, error: "Invalid state" });
+      // valida HMAC (recomendado)
+      if (!validateHmac(req.query as any)) {
+        throw new Error("Invalid Shopify HMAC");
+      }
+
+      const token = await exchangeCodeForToken({ shop, code });
+
+      // Aqui você salva no DB depois (Shop Context Loader vai usar isso)
+      // Ex: await upsertShopifyConnection({ shop, accessToken: token.access_token, scope: token.scope })
+
+      return reply.send({
+        ok: true,
+        shop,
+        scope: token.scope ?? null,
+        message: "OAuth success. Access token acquired.",
+      });
+    } catch (err: any) {
+      req.log.error(err);
+      return reply.status(400).send({ ok: false, error: err?.message ?? "OAuth error" });
     }
-
-    // 3) valida hmac
-    const okHmac = verifyHmac(q, env.SHOPIFY_CLIENT_SECRET);
-    if (!okHmac) {
-      return reply.code(401).send({ ok: false, error: "Invalid HMAC" });
-    }
-
-    // 4) troca code por token
-    const code = String(q.code || "");
-    if (!code) return reply.code(400).send({ ok: false, error: "Missing code" });
-
-    const token = await exchangeCodeForToken(shop, code);
-
-    // 5) salva conexão no DB
-    await upsertShopifyConnection({
-      shop,
-      accessToken: token.access_token,
-      scope: token.scope,
-    });
-
-    // 6) redireciona para uma página sua (por enquanto manda JSON ou home)
-    // Se você tiver um frontend embed, a URL normalmente inclui shop e host.
-    return reply.send({ ok: true, shop, installed: true });
   });
 }

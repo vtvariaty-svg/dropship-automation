@@ -1,39 +1,37 @@
-// apps/api/src/integrations/shopify/client.ts
-import { env } from "../../env";
-import { normalizeShop, validateShopParam } from "./oauth";
+import { adminGraphQLEndpoint } from "./oauth";
 
-export type ShopifyGraphQLResponse<T> = {
-  data?: T;
-  errors?: Array<{ message: string; extensions?: any }>;
-};
+export async function shopifyGraphQL(args: {
+  shop: string;
+  accessToken: string;
+  query: string;
+  variables?: Record<string, unknown>;
+}): Promise<any> {
+  const { shop, accessToken, query, variables } = args;
 
-function endpoint(shopRaw: string): string {
-  const shop = normalizeShop(shopRaw);
-  validateShopParam(shop);
-  return `https://${shop}/admin/api/${env.SHOPIFY_API_VERSION}/graphql.json`;
-}
-
-export async function shopifyGraphql<T>(
-  shop: string,
-  accessToken: string,
-  query: string,
-  variables?: Record<string, any>
-): Promise<ShopifyGraphQLResponse<T>> {
-  const res = await fetch(endpoint(shop), {
+  const resp = await fetch(adminGraphQLEndpoint(shop), {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
-      "X-Shopify-Access-Token": accessToken,
+      "content-type": "application/json",
+      "x-shopify-access-token": accessToken,
     },
-    body: JSON.stringify({ query, variables: variables ?? {} }),
+    body: JSON.stringify({ query, variables }),
   });
 
-  const json = (await res.json()) as ShopifyGraphQLResponse<T>;
+  const json = await resp.json().catch(() => ({}));
 
-  if (!res.ok) {
-    const msg = json?.errors?.[0]?.message ?? `HTTP ${res.status}`;
-    throw new Error(`Shopify GraphQL error: ${msg}`);
+  if (!resp.ok) {
+    throw new Error(`Shopify GraphQL HTTP ${resp.status}: ${JSON.stringify(json)}`);
+  }
+
+  if (json?.errors) {
+    throw new Error(`Shopify GraphQL errors: ${JSON.stringify(json.errors)}`);
   }
 
   return json;
 }
+
+/**
+ * Aliases para compatibilidade com nomes antigos (evita quebrar build).
+ */
+export const shopifyGraphql = shopifyGraphQL;
+export const shopifyGraphQL_ = shopifyGraphQL;
