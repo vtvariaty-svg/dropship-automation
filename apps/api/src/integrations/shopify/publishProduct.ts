@@ -1,32 +1,41 @@
 import { shopifyGraphQL } from "./client";
 
-export async function publishProduct(args: {
+export async function publishProductToShopify(params: {
   shop: string;
   accessToken: string;
-  productId: string; // "gid://shopify/Product/123..."
-}): Promise<any> {
-  const { shop, accessToken, productId } = args;
-
-  // Exemplo simples: publica em um sales channel padrão (Online Store)
-  // (Você pode evoluir depois pra escolher publicationId dinamicamente.)
-  const query = `
-    mutation PublishProduct($id: ID!) {
-      publishablePublish(id: $id, input: { publicationId: "gid://shopify/Publication/1" }) {
-        publishable {
-          __typename
-        }
-        userErrors {
-          field
-          message
-        }
+  title: string;
+  descriptionHtml: string;
+  images: string[];
+  price: number;
+}) {
+  const mutation = `
+    mutation CreateProduct($input: ProductInput!) {
+      productCreate(input: $input) {
+        product { id handle }
+        userErrors { field message }
       }
     }
   `;
 
-  return shopifyGraphQL({
-    shop,
-    accessToken,
-    query,
-    variables: { id: productId },
+  const variables = {
+    input: {
+      title: params.title,
+      descriptionHtml: params.descriptionHtml,
+      status: "ACTIVE",
+      variants: [{ price: params.price.toFixed(2) }],
+      images: params.images.map((src) => ({ src })),
+    },
+  };
+
+  const data = await shopifyGraphQL<any>({
+    shop: params.shop,
+    accessToken: params.accessToken,
+    query: mutation,
+    variables,
   });
+
+  const errs = data.productCreate?.userErrors ?? [];
+  if (errs.length) throw new Error(`Shopify userErrors: ${JSON.stringify(errs)}`);
+
+  return data.productCreate.product as { id: string; handle: string };
 }

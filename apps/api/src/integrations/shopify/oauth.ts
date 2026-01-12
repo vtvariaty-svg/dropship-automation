@@ -1,89 +1,73 @@
 import crypto from "node:crypto";
 import { env } from "../../env";
 
-/* ------------------ helpers ------------------ */
+const STATE_COOKIE = "shopify_oauth_state";
 
-export function isValidShop(shop: string): boolean {
-  return /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i.test(shop);
+export function buildInstallUrl(shop: string, state: string) {
+  const params = new URLSearchParams({
+    client_id: env.SHOPIFY_API_KEY,
+    scope: env.SHOPIFY_SCOPES,
+    redirect_uri: `${env.BASE_URL}/shopify/callback`,
+    state,
+  });
+
+  return `https://${shop}/admin/oauth/authorize?${params.toString()}`;
 }
 
-export function randomState(bytes = 16): string {
-  return crypto.randomBytes(bytes).toString("hex");
+export function generateState(): string {
+  return crypto.randomBytes(16).toString("hex");
 }
 
-/* ------------------ OAuth ------------------ */
+export function assertValidCallback(query: any, cookies: any) {
+  const { hmac, state, shop, code } = query;
 
-export function buildInstallUrl(shop: string, state: string): string {
-  if (!isValidShop(shop)) {
-    throw new Error(`Invalid shop domain: ${shop}`);
+  if (!hmac || !state || !shop || !code) {
+    throw new Error("Missing OAuth parameters");
   }
 
-  const url = new URL(`https://${shop}/admin/oauth/authorize`);
-  url.searchParams.set("client_id", env.SHOPIFY_CLIENT_ID);
-  url.searchParams.set("scope", env.SHOPIFY_SCOPES);
-  url.searchParams.set("redirect_uri", env.SHOPIFY_REDIRECT_URI);
-  url.searchParams.set("state", state);
-  url.searchParams.set("grant_options[]", "per-user");
+  if (!cookies[STATE_COOKIE] || cookies[STATE_COOKIE] !== state) {
+    throw new Error("Invalid OAuth state");
+  }
 
-  return url.toString();
+  validateHmac(query);
+
+  return { shop, code };
 }
 
-export function verifyHmac(
-  query: Record<string, unknown>,
-  secret = env.SHOPIFY_CLIENT_SECRET
-): boolean {
-  const hmac = String(query.hmac ?? "");
-  if (!hmac) return false;
+function validateHmac(query: any) {
+  const { hmac, ...rest } = query;
 
-  const pairs: string[] = [];
-  for (const [k, v] of Object.entries(query)) {
-    if (k === "hmac" || k === "signature") continue;
-    if (v === undefined || v === null) continue;
-    pairs.push(`${k}=${v.toString()}`);
-  }
-  pairs.sort();
+  const message = Object.keys(rest)
+    .sort()
+    .map((key) => `${key}=${Array.isArray(rest[key]) ? rest[key].join(",") : rest[key]}`)
+    .join("&");
 
-  const message = pairs.join("&");
-  const digest = crypto
-    .createHmac("sha256", secret)
+  const generated = crypto
+    .createHmac("sha256", env.SHOPIFY_API_SECRET)
     .update(message)
     .digest("hex");
 
-  return crypto.timingSafeEqual(
-    Buffer.from(digest, "utf8"),
-    Buffer.from(hmac, "utf8")
-  );
+  if (generated !== hmac) {
+    throw new Error("Invalid HMAC");
+  }
 }
 
-export async function exchangeCodeForToken(
-  shop: string,
-  code: string
-): Promise<string> {
-  const res = await fetch(`https://${shop}/admin/oauth/access_token`, {
+export async function exchangeCodeForToken(shop: string, code: string) {
+  const response = await fetch(`https://${shop}/admin/oauth/access_token`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      client_id: env.SHOPIFY_CLIENT_ID,
-      client_secret: env.SHOPIFY_CLIENT_SECRET,
+      client_id: env.SHOPIFY_API_KEY,
+      client_secret: env.SHOPIFY_API_SECRET,
       code,
     }),
   });
 
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Token exchange failed (${res.status}): ${txt}`);
+  if (!response.ok) {
+    throw new Error("Failed to exchange code for token");
   }
 
-  const data = (await res.json()) as { access_token?: string };
-  if (!data.access_token) {
-    throw new Error("No access_token returned by Shopify");
-  }
-
-  return data.access_token;
+  return response.json() as Promise<{ access_token: string; scope: string }>;
 }
 
-/* ------------------ API endpoints ------------------ */
-
-export function adminGraphQLEndpoint(shop: string): string {
-  return `https://${shop}/admin/api/${env.SHOPIFY_API_VERSION}/graphql.json`;
-}
+export const stateCookieName = STATE_COOKIE;

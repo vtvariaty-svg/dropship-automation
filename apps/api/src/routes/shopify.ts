@@ -1,63 +1,52 @@
 import type { FastifyInstance } from "fastify";
-import { env } from "../env";
 import {
   buildInstallUrl,
+  generateState,
+  assertValidCallback,
   exchangeCodeForToken,
-  isValidShop,
-  randomState,
-  verifyHmac,
+  stateCookieName,
 } from "../integrations/shopify/oauth";
-import { upsertShopifyConnection } from "../integrations/shopify/store";
+import { saveShopToken } from "../integrations/shopify/store";
 
 export async function shopifyRoutes(app: FastifyInstance) {
   app.get("/shopify/install", async (req, reply) => {
-    const shop = String((req.query as any)?.shop ?? "").trim();
-    if (!isValidShop(shop)) {
-      return reply.code(400).send({ ok: false, error: "Invalid shop" });
+    const shop = (req.query as any).shop;
+    if (!shop) {
+      return reply.status(400).send({ error: "Missing shop param" });
     }
 
-    const state = randomState();
-    reply.setCookie("shopify_state", state, {
+    const state = generateState();
+
+    reply.setCookie(stateCookieName, state, {
       httpOnly: true,
       sameSite: "lax",
-      secure: env.NODE_ENV === "production",
       path: "/",
-      maxAge: 600,
     });
 
-    const redirectUrl = buildInstallUrl(shop, state);
-    return reply.redirect(302, redirectUrl);
+    const url = buildInstallUrl(shop, state);
+    return reply.redirect(url);
   });
 
   app.get("/shopify/callback", async (req, reply) => {
-    const q = req.query as Record<string, any>;
-    const shop = String(q.shop ?? "");
-    const code = String(q.code ?? "");
-    const state = String(q.state ?? "");
+    const { shop, code } = assertValidCallback(req.query, req.cookies);
 
-    if (!isValidShop(shop) || !code) {
-      return reply.code(400).send({ ok: false, error: "Invalid callback params" });
-    }
+    const token = await exchangeCodeForToken(shop, code);
 
-    const cookieState = (req.cookies as any)?.shopify_state;
-    if (!cookieState || cookieState !== state) {
-      return reply.code(401).send({ ok: false, error: "Invalid state" });
-    }
-
-    if (!verifyHmac(q)) {
-      return reply.code(401).send({ ok: false, error: "Invalid HMAC" });
-    }
-
-    const accessToken = await exchangeCodeForToken(shop, code);
-
-    await upsertShopifyConnection({
+    await saveShopToken({
       shop,
-      accessToken,
-      scopes: env.SHOPIFY_SCOPES,
+      accessToken: token.access_token,
+      scope: token.scope,
     });
 
-    reply.clearCookie("shopify_state", { path: "/" });
-
     return reply.send({ ok: true, shop });
+  });
+
+  app.get("/shopify/connection", async (req, reply) => {
+    const shop = (req.query as any).shop;
+    if (!shop) {
+      return reply.status(400).send({ error: "Missing shop param" });
+    }
+
+    return reply.send({ shop, connected: true });
   });
 }
