@@ -1,20 +1,22 @@
 import Fastify from "fastify";
 import cookie from "@fastify/cookie";
 import { env } from "./env";
+
 import { shopifyRoutes } from "./routes/shopify";
-import { contextDebugRoutes } from "./routes/contextDebug";
+import { shopifyAdminRoutes } from "./routes/shopifyAdmin";
+
+// ✅ você já tem isso no projeto atual
 import { loadShopContext } from "./integrations/shopify/context";
-import { shopifyAdminTestRoutes } from "./routes/shopifyAdminTest";
 
-
-
+// (se você ainda estiver usando o debug, pode manter)
+// import { contextDebugRoutes } from "./routes/contextDebug";
 
 async function bootstrap() {
   const app = Fastify({ logger: true });
 
   await app.register(cookie);
 
-  // ✅ SHOP CONTEXT LOADER — GLOBAL (SEM ENCAPSULAMENTO)
+  // ✅ SHOP CONTEXT LOADER — GLOBAL (multi-tenant)
   app.addHook("preHandler", async (req) => {
     const shopRaw =
       (req.query as any)?.shop ??
@@ -39,8 +41,10 @@ async function bootstrap() {
   app.get("/status", async () => ({ status: "running" }));
 
   await app.register(shopifyRoutes);
-  await app.register(contextDebugRoutes);
-  await app.register(shopifyAdminTestRoutes);
+  await app.register(shopifyAdminRoutes);
+
+  // se quiser manter debug por mais 1 passo:
+  // await app.register(contextDebugRoutes);
 
   await app.listen({
     port: env.PORT,
