@@ -5,18 +5,18 @@ import { env } from "./env";
 import { shopifyRoutes } from "./routes/shopify";
 import { shopifyAdminRoutes } from "./routes/shopifyAdmin";
 
-// ✅ você já tem isso no projeto atual
 import { loadShopContext } from "./integrations/shopify/context";
 
-// (se você ainda estiver usando o debug, pode manter)
+// (debug é opcional — pode remover depois)
 // import { contextDebugRoutes } from "./routes/contextDebug";
 
 async function bootstrap() {
   const app = Fastify({ logger: true });
 
+  // cookies (state OAuth etc)
   await app.register(cookie);
 
-  // ✅ SHOP CONTEXT LOADER — GLOBAL (multi-tenant)
+  // ✅ SHOP CONTEXT LOADER — GLOBAL (sem encapsulamento)
   app.addHook("preHandler", async (req) => {
     const shopRaw =
       (req.query as any)?.shop ??
@@ -37,13 +37,15 @@ async function bootstrap() {
     }
   });
 
+  // healthchecks
   app.get("/health", async () => ({ ok: true }));
   app.get("/status", async () => ({ status: "running" }));
 
+  // Shopify OAuth + Admin API
   await app.register(shopifyRoutes);
   await app.register(shopifyAdminRoutes);
 
-  // se quiser manter debug por mais 1 passo:
+  // se quiser manter debug temporariamente
   // await app.register(contextDebugRoutes);
 
   await app.listen({
