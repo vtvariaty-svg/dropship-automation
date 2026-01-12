@@ -1,36 +1,50 @@
-import { z } from "zod";
+import { config } from "dotenv";
+config();
 
-const schema = z.object({
-  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
-
-  // Render pode fornecer PORT como string
-  PORT: z.coerce.number().default(3000),
-
-  // Base pública do backend (ex: https://cliquebuy-automation-api.onrender.com)
-  BASE_URL: z.string().min(1),
-
-  // Opcional: base do web (se você tiver frontend). Pode ser igual ao BASE_URL.
-  PUBLIC_WEB_BASE_URL: z.string().optional(),
-
-  DATABASE_URL: z.string().min(1),
-
-  // Opcional
-  REDIS_URL: z.string().optional(),
-
-  // Shopify (nomes "recomendados" que você está usando no Render)
-  SHOPIFY_CLIENT_ID: z.string().min(1),
-  SHOPIFY_CLIENT_SECRET: z.string().min(1),
-  SHOPIFY_SCOPES: z.string().min(1),
-  SHOPIFY_API_VERSION: z.string().min(1),
-  SHOPIFY_REDIRECT_URI: z.string().min(1),
-});
-
-const parsed = schema.safeParse(process.env);
-
-if (!parsed.success) {
-  const details = parsed.error.flatten().fieldErrors;
-  throw new Error(`Invalid environment variables:\n${JSON.stringify(details, null, 2)}`);
+function req(name: string): string {
+  const v = process.env[name];
+  if (!v || v.trim() === "") {
+    throw new Error(`Missing required env var: ${name}`);
+  }
+  return v.trim();
 }
 
-export type Env = z.infer<typeof schema>;
-export const env: Env = parsed.data;
+function opt(name: string, def?: string): string | undefined {
+  const v = process.env[name];
+  if (!v || v.trim() === "") return def;
+  return v.trim();
+}
+
+function num(name: string, def: number): number {
+  const v = opt(name);
+  if (!v) return def;
+  const n = Number(v);
+  if (!Number.isFinite(n)) throw new Error(`Env ${name} must be a number`);
+  return n;
+}
+
+export const env = {
+  NODE_ENV: (opt("NODE_ENV", "development") as
+    | "development"
+    | "test"
+    | "production"),
+
+  PORT: num("PORT", 3000),
+
+  BASE_URL: opt("BASE_URL") ?? req("PUBLIC_WEB_BASE_URL"),
+  PUBLIC_WEB_BASE_URL: opt("PUBLIC_WEB_BASE_URL"),
+
+  DATABASE_URL: req("DATABASE_URL"),
+  REDIS_URL: opt("REDIS_URL"),
+
+  SHOPIFY_CLIENT_ID: req("SHOPIFY_CLIENT_ID"),
+  SHOPIFY_CLIENT_SECRET: req("SHOPIFY_CLIENT_SECRET"),
+  SHOPIFY_SCOPES: req("SHOPIFY_SCOPES"),
+  SHOPIFY_API_VERSION: req("SHOPIFY_API_VERSION"),
+
+  SHOPIFY_REDIRECT_URI:
+    opt("SHOPIFY_REDIRECT_URI") ??
+    `${opt("BASE_URL") ?? req("PUBLIC_WEB_BASE_URL")}/shopify/callback`,
+} as const;
+
+export type Env = typeof env;

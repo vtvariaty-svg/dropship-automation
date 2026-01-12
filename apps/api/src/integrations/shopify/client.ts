@@ -1,37 +1,25 @@
 import { adminGraphQLEndpoint } from "./oauth";
 
-export async function shopifyGraphQL(args: {
-  shop: string;
-  accessToken: string;
-  query: string;
-  variables?: Record<string, unknown>;
-}): Promise<any> {
-  const { shop, accessToken, query, variables } = args;
-
-  const resp = await fetch(adminGraphQLEndpoint(shop), {
+export async function shopifyGraphQL<T>(
+  shop: string,
+  accessToken: string,
+  query: string,
+  variables?: Record<string, unknown>
+): Promise<T> {
+  const res = await fetch(adminGraphQLEndpoint(shop), {
     method: "POST",
     headers: {
-      "content-type": "application/json",
-      "x-shopify-access-token": accessToken,
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": accessToken,
     },
     body: JSON.stringify({ query, variables }),
   });
 
-  const json = await resp.json().catch(() => ({}));
+  const json = await res.json();
 
-  if (!resp.ok) {
-    throw new Error(`Shopify GraphQL HTTP ${resp.status}: ${JSON.stringify(json)}`);
+  if (!res.ok || json.errors) {
+    throw new Error(`Shopify GraphQL error: ${JSON.stringify(json)}`);
   }
 
-  if (json?.errors) {
-    throw new Error(`Shopify GraphQL errors: ${JSON.stringify(json.errors)}`);
-  }
-
-  return json;
+  return json.data as T;
 }
-
-/**
- * Aliases para compatibilidade com nomes antigos (evita quebrar build).
- */
-export const shopifyGraphql = shopifyGraphQL;
-export const shopifyGraphQL_ = shopifyGraphQL;

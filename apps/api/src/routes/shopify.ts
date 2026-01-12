@@ -1,65 +1,63 @@
 import type { FastifyInstance } from "fastify";
-import { buildInstallUrl, exchangeCodeForToken, randomState, validateHmac } from "../integrations/shopify/oauth";
-
-function requireQueryString(query: any, key: string): string {
-  const v = query?.[key];
-  if (!v || typeof v !== "string") throw new Error(`Missing or invalid query param: ${key}`);
-  return v;
-}
+import { env } from "../env";
+import {
+  buildInstallUrl,
+  exchangeCodeForToken,
+  isValidShop,
+  randomState,
+  verifyHmac,
+} from "../integrations/shopify/oauth";
+import { upsertShopifyConnection } from "../integrations/shopify/store";
 
 export async function shopifyRoutes(app: FastifyInstance) {
-  // Inicia instalação
   app.get("/shopify/install", async (req, reply) => {
-    try {
-      const shop = requireQueryString(req.query, "shop");
-
-      const state = randomState(16);
-      // cookie pro callback validar state (se você quiser validar depois)
-      reply.setCookie("shopify_oauth_state", state, {
-        path: "/",
-        httpOnly: true,
-        sameSite: "lax",
-        secure: true,
-      });
-
-      const url = buildInstallUrl({ shop, state });
-      return reply.status(302).redirect(url);
-    } catch (err: any) {
-      req.log.error(err);
-      return reply.status(400).send({ ok: false, error: err?.message ?? "Bad Request" });
+    const shop = String((req.query as any)?.shop ?? "").trim();
+    if (!isValidShop(shop)) {
+      return reply.code(400).send({ ok: false, error: "Invalid shop" });
     }
+
+    const state = randomState();
+    reply.setCookie("shopify_state", state, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: env.NODE_ENV === "production",
+      path: "/",
+      maxAge: 600,
+    });
+
+    const redirectUrl = buildInstallUrl(shop, state);
+    return reply.redirect(302, redirectUrl);
   });
 
-  // Callback OAuth
   app.get("/shopify/callback", async (req, reply) => {
-    try {
-      const shop = requireQueryString(req.query, "shop");
-      const code = requireQueryString(req.query, "code");
+    const q = req.query as Record<string, any>;
+    const shop = String(q.shop ?? "");
+    const code = String(q.code ?? "");
+    const state = String(q.state ?? "");
 
-      // (Opcional) validar state contra cookie
-      // const state = requireQueryString(req.query, "state");
-      // const cookieState = (req.cookies as any)?.shopify_oauth_state;
-      // if (!cookieState || cookieState !== state) throw new Error("Invalid OAuth state");
-
-      // valida HMAC (recomendado)
-      if (!validateHmac(req.query as any)) {
-        throw new Error("Invalid Shopify HMAC");
-      }
-
-      const token = await exchangeCodeForToken({ shop, code });
-
-      // Aqui você salva no DB depois (Shop Context Loader vai usar isso)
-      // Ex: await upsertShopifyConnection({ shop, accessToken: token.access_token, scope: token.scope })
-
-      return reply.send({
-        ok: true,
-        shop,
-        scope: token.scope ?? null,
-        message: "OAuth success. Access token acquired.",
-      });
-    } catch (err: any) {
-      req.log.error(err);
-      return reply.status(400).send({ ok: false, error: err?.message ?? "OAuth error" });
+    if (!isValidShop(shop) || !code) {
+      return reply.code(400).send({ ok: false, error: "Invalid callback params" });
     }
+
+    const cookieState = (req.cookies as any)?.shopify_state;
+    if (!cookieState || cookieState !== state) {
+      return reply.code(401).send({ ok: false, error: "Invalid state" });
+    }
+
+    if (!verifyHmac(q)) {
+      return reply.code(401).send({ ok: false, error: "Invalid HMAC" });
+    }
+
+    const accessToken = await exchangeCodeForToken(shop, code);
+
+    await upsertShopifyConnection({
+      shop,
+      accessToken,
+      scopes: env.SHOPIFY_SCOPES,
+    });
+
+    reply.clearCookie("shopify_state", { path: "/" });
+
+    return reply.send({ ok: true, shop });
   });
 }
