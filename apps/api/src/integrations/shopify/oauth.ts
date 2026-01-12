@@ -28,10 +28,10 @@ export function validateHmac(query: Record<string, unknown>): boolean {
   const hmac = String(query.hmac ?? "");
   if (!hmac) return false;
 
-  // Shopify recomenda remover hmac e signature antes de assinar
-  const entries: [string, string][] = Object.entries(query)
+  // Remove hmac e signature antes de assinar
+  const entries = Object.entries(query)
     .filter(([k]) => k !== "hmac" && k !== "signature")
-    .map(([k, v]) => [k, String(v)])
+    .map(([k, v]) => [k, String(v)] as [string, string]) // 👈 força tupla
     .sort(([a], [b]) => a.localeCompare(b));
 
   const message = entries.map(([k, v]) => `${k}=${v}`).join("&");
