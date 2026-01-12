@@ -6,7 +6,7 @@ export type ShopContext = {
 };
 
 export async function loadShopContext(shop: string): Promise<ShopContext> {
-  const res = await pool.query(
+  const result = await pool.query(
     `
     select shop, access_token
     from shopify_oauth
@@ -15,12 +15,12 @@ export async function loadShopContext(shop: string): Promise<ShopContext> {
     [shop]
   );
 
-  if (res.rowCount === 0) {
+  if (result.rowCount === 0) {
     throw new Error("Shop not connected");
   }
 
   return {
-    shop: res.rows[0].shop,
-    accessToken: res.rows[0].access_token,
+    shop: result.rows[0].shop,
+    accessToken: result.rows[0].access_token,
   };
 }

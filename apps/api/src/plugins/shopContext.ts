@@ -18,7 +18,6 @@ export async function shopContextPlugin(app: FastifyInstance) {
     try {
       req.shopContext = await loadShopContext(String(shop));
     } catch {
-      // não bloqueia rotas públicas
       req.shopContext = undefined;
     }
   });
