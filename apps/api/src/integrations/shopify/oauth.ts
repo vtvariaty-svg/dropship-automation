@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { env } from "../../env";
-import { ShopifyAdminClient } from "../integrations/shopify/adminClient";
-import { ensureWebhooks } from "../integrations/shopify/webhookRegistrar";
+import { ShopifyAdminClient } from "./adminClient";
+import { ensureWebhooks } from "./webhookRegistrar";
 
 // Cookie único e estável para o state do OAuth.
 // Mantém consistência entre /install e /callback.
@@ -34,32 +34,46 @@ export function buildInstallUrl(shop: string, state: string): string {
   return url.toString();
 }
 
-export function verifyHmac(
-  query: Record<string, unknown>,
-  secret = env.SHOPIFY_CLIENT_SECRET
-): boolean {
-  const hmac = String(query.hmac ?? "");
-  if (!hmac) return false;
+/**
+ * Verifica o HMAC do querystring do callback (/shopify/callback).
+ * Regras Shopify:
+ * - remover "signature" se existir
+ * - remover "hmac"
+ * - ordenar chaves
+ * - montar query "key=value&key2=value2"
+ * - HMAC-SHA256 com SHOPIFY_CLIENT_SECRET
+ */
+export function verifyHmac(query: Record<string, unknown>, hmac: string): boolean {
+  const message = Object.keys(query)
+    .filter((k) => k !== "hmac" && k !== "signature")
+    .sort()
+    .map((key) => {
+      const value = query[key];
+      if (Array.isArray(value)) {
+        return value.map((v) => `${key}=${String(v)}`).join("&");
+      }
+      return `${key}=${String(value)}`;
+    })
+    .join("&");
 
-  const pairs: string[] = [];
-  for (const [k, v] of Object.entries(query)) {
-    if (k === "hmac" || k === "signature") continue;
-    if (v === undefined || v === null) continue;
-    pairs.push(`${k}=${v.toString()}`);
-  }
-  pairs.sort();
-
-  const message = pairs.join("&");
-  const digest = crypto.createHmac("sha256", secret).update(message).digest("hex");
+  const digest = crypto
+    .createHmac("sha256", env.SHOPIFY_CLIENT_SECRET)
+    .update(message)
+    .digest("hex");
 
   // timingSafeEqual exige buffers de mesmo tamanho.
   const a = Buffer.from(digest, "utf8");
   const b = Buffer.from(hmac, "utf8");
   if (a.length !== b.length) return false;
+
   return crypto.timingSafeEqual(a, b);
 }
 
 export async function exchangeCodeForToken(shop: string, code: string): Promise<string> {
+  if (!isValidShop(shop)) {
+    throw new Error(`Invalid shop domain: ${shop}`);
+  }
+
   const res = await fetch(`https://${shop}/admin/oauth/access_token`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -83,12 +97,22 @@ export async function exchangeCodeForToken(shop: string, code: string): Promise<
   return data.access_token;
 }
 
-// depois de salvar access_token:
-const client = new ShopifyAdminClient({
-  shop,
-  accessToken,
-});
-await ensureWebhooks(client);
+/**
+ * ✅ Use isso no /shopify/callback depois de persistir o token.
+ * Evita top-level await e garante que "shop/accessToken" existem no escopo.
+ */
+export async function registerWebhooksForShop(shop: string, accessToken: string): Promise<void> {
+  if (!isValidShop(shop)) {
+    throw new Error(`Invalid shop domain: ${shop}`);
+  }
+  if (!accessToken) {
+    throw new Error("Missing accessToken");
+  }
+
+  const client = new ShopifyAdminClient({ shop, accessToken });
+  await ensureWebhooks(client);
+}
+
 /* ------------------ API endpoints ------------------ */
 
 export function adminGraphQLEndpoint(shop: string): string {
