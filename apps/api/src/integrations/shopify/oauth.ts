@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 import { env } from "../../env";
+import { ShopifyAdminClient } from "../integrations/shopify/adminClient";
+import { ensureWebhooks } from "../integrations/shopify/webhookRegistrar";
 
 // Cookie único e estável para o state do OAuth.
 // Mantém consistência entre /install e /callback.
@@ -81,6 +83,12 @@ export async function exchangeCodeForToken(shop: string, code: string): Promise<
   return data.access_token;
 }
 
+// depois de salvar access_token:
+const client = new ShopifyAdminClient({
+  shop,
+  accessToken,
+});
+await ensureWebhooks(client);
 /* ------------------ API endpoints ------------------ */
 
 export function adminGraphQLEndpoint(shop: string): string {
