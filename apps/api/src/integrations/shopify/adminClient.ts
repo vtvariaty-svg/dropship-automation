@@ -1,72 +1,61 @@
 import { env } from "../../env";
 
-type Json = Record<string, unknown>;
+export type ShopifyAdminClient = {
+  request<T = any>(
+    query: string,
+    variables?: Record<string, any>
+  ): Promise<T>;
+};
 
-export class ShopifyAdminClient {
-  private shop: string;
-  private accessToken: string;
-  private apiVersion: string;
+/**
+ * Cria um client GraphQL ADMIN para Shopify
+ * USO OBRIGATÓRIO em TODO o projeto
+ */
+export function createShopifyAdminClient(params: {
+  shop: string;
+  accessToken: string;
+}): ShopifyAdminClient {
+  const { shop, accessToken } = params;
 
-  constructor(params: { shop: string; accessToken: string; apiVersion?: string }) {
-    this.shop = params.shop;
-    this.accessToken = params.accessToken;
-    this.apiVersion = params.apiVersion ?? env.SHOPIFY_API_VERSION;
+  if (!shop || !accessToken) {
+    throw new Error("Shopify Admin Client: shop ou accessToken ausente");
   }
 
-  private baseUrl() {
-    return `https://${this.shop}`;
-  }
+  const endpoint = `https://${shop}/admin/api/${env.SHOPIFY_API_VERSION}/graphql.json`;
 
-  async rest<T = any>(params: {
-    method: "GET" | "POST" | "PUT" | "DELETE";
-    path: string; // ex: /webhooks.json
-    body?: unknown;
-  }): Promise<T> {
-    const url = `${this.baseUrl()}/admin/api/${this.apiVersion}${params.path}`;
-    const res = await fetch(url, {
-      method: params.method,
-      headers: {
-        "X-Shopify-Access-Token": this.accessToken,
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-      },
-      body: params.body ? JSON.stringify(params.body) : undefined,
-    });
-
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`Shopify REST ${params.method} ${params.path} failed: ${res.status} ${text}`);
-    }
-
-    return (await res.json()) as T;
-  }
-
-  async listWebhooks(): Promise<{ id: number; topic: string; address: string }[]> {
-    const data = await this.rest<{ webhooks: { id: number; topic: string; address: string }[] }>({
-      method: "GET",
-      path: "/webhooks.json",
-    });
-    return data.webhooks ?? [];
-  }
-
-  async createWebhook(params: { topic: string; address: string }): Promise<{ id: number }> {
-    const data = await this.rest<{ webhook: { id: number } }>({
-      method: "POST",
-      path: "/webhooks.json",
-      body: {
-        webhook: {
-          topic: params.topic,
-          address: params.address,
-          format: "json",
+  return {
+    async request<T = any>(
+      query: string,
+      variables: Record<string, any> = {}
+    ): Promise<T> {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": accessToken,
         },
-      },
-    });
-    return data.webhook;
-  }
-}
+        body: JSON.stringify({
+          query,
+          variables,
+        }),
+      });
 
-export function buildWebhookCallbackUrl() {
-  // BASE_URL deve ser https://... (Render)
-  const base = env.BASE_URL.replace(/\/$/, "");
-  return `${base}/shopify/webhooks`;
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(
+          `Shopify GraphQL HTTP ${res.status}: ${text}`
+        );
+      }
+
+      const json = await res.json();
+
+      if (json.errors) {
+        throw new Error(
+          `Shopify GraphQL Error: ${JSON.stringify(json.errors)}`
+        );
+      }
+
+      return json.data as T;
+    },
+  };
 }
