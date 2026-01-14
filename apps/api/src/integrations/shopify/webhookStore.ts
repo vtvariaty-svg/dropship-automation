@@ -1,42 +1,29 @@
 import { pool } from "../../db/pool";
 
-export type WebhookEventStatus = "received" | "processed" | "failed";
-
-export type WebhookEventInsert = {
+type InsertWebhookParams = {
   webhookId: string;
   shop: string;
   topic: string;
-  apiVersion?: string | null;
-  payload: unknown;
-  payloadRaw?: string | null;
-  headers: Record<string, string | string[] | undefined>;
-  status: WebhookEventStatus;
+  apiVersion: string | null;
+  payloadJson: unknown;
+  payloadRaw: string;
+  headersJson: Record<string, unknown>;
 };
 
-export async function insertWebhookEvent(input: WebhookEventInsert): Promise<{
-  ok: true;
-  id: number | null;
-}> {
+export async function insertWebhookEventIfNew(params: InsertWebhookParams) {
+  const { webhookId, shop, topic, apiVersion, payloadJson, payloadRaw, headersJson } = params;
+
   const res = await pool.query(
     `
     insert into shopify_webhook_events
-      (webhook_id, shop, topic, payload, headers, received_at, status, api_version, payload_raw)
+      (webhook_id, shop, topic, api_version, payload, payload_raw, headers, received_at, status)
     values
-      ($1, $2, $3, $4::jsonb, $5::jsonb, now(), $6, $7, $8)
-    returning id;
+      ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, now(), 'received')
+    on conflict (webhook_id) do nothing
     `,
-    [
-      input.webhookId,
-      input.shop,
-      input.topic,
-      JSON.stringify(input.payload ?? {}),
-      JSON.stringify(input.headers ?? {}),
-      input.status,
-      input.apiVersion ?? null,
-      input.payloadRaw ?? null,
-    ]
+    [webhookId, shop, topic, apiVersion, JSON.stringify(payloadJson ?? null), payloadRaw, JSON.stringify(headersJson ?? {})]
   );
 
-  const id = res.rows?.[0]?.id ?? null;
-  return { ok: true, id };
+  const inserted = (res.rowCount ?? 0) > 0;
+  return { inserted };
 }

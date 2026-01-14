@@ -1,80 +1,65 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
-import { FastifyPluginAsync } from "fastify";
+import { FastifyInstance } from "fastify";
 import { env } from "../env";
-import { insertWebhookEvent } from "../integrations/shopify/webhookStore";
+import { normalizeShop, verifyWebhookHmac } from "../integrations/shopify/oauth";
+import { insertWebhookEventIfNew } from "../integrations/shopify/webhookStore";
 
-function verifyWebhookHmac(rawBody: Buffer, hmacHeader: string): boolean {
-  const computed = createHmac("sha256", env.SHOPIFY_CLIENT_SECRET)
-    .update(rawBody)
-    .digest("base64");
-
-  try {
-    return timingSafeEqual(
-      Buffer.from(computed, "utf8"),
-      Buffer.from(hmacHeader, "utf8")
-    );
-  } catch {
-    return false;
-  }
-}
-
-export const shopifyWebhooksRoutes: FastifyPluginAsync = async (app) => {
-  // Parser pra manter RAW body como Buffer (necessário pro HMAC)
+export async function shopifyWebhooksRoutes(app: FastifyInstance) {
+  // IMPORTANTÍSSIMO: pegar RAW body
   app.addContentTypeParser(
-    ["application/json", "application/*+json"],
-    { parseAs: "buffer" },
-    (req, body, done) => {
-      done(null, body);
-    }
+    "application/json",
+    { parseAs: "string" },
+    (req, body, done) => done(null, body)
   );
 
   app.post("/shopify/webhooks", async (req, reply) => {
-    const rawBody = req.body as Buffer;
-    if (!Buffer.isBuffer(rawBody)) {
-      reply.code(400);
-      return { ok: false, error: "Expected raw body buffer" };
-    }
+    const headers = req.headers as Record<string, any>;
 
-    const shop = (req.headers["x-shopify-shop-domain"] as string) ?? null;
-    const topic = (req.headers["x-shopify-topic"] as string) ?? null;
-    const webhookId = (req.headers["x-shopify-webhook-id"] as string) ?? null;
-    const hmac = (req.headers["x-shopify-hmac-sha256"] as string) ?? null;
-    const apiVersion =
-      ((req.headers["x-shopify-api-version"] as string) ?? null) || null;
+    const shop = normalizeShop(headers["x-shopify-shop-domain"] ?? "");
+    const topic = String(headers["x-shopify-topic"] ?? "");
+    const webhookId = String(headers["x-shopify-webhook-id"] ?? "");
+    const hmac = String(headers["x-shopify-hmac-sha256"] ?? "");
+    const apiVersion = headers["x-shopify-api-version"] ? String(headers["x-shopify-api-version"]) : null;
 
-    if (!shop || !topic || !webhookId || !hmac) {
-      reply.code(400);
-      return {
+    const rawBody = typeof req.body === "string" ? req.body : "";
+
+    if (!shop || !topic || !webhookId) {
+      return reply.code(400).send({
         ok: false,
-        error: "Missing required webhook headers (shop/topic/webhook-id/hmac)",
-      };
+        error: "Missing required webhook headers (shop/topic/webhook-id)",
+      });
     }
 
-    if (!verifyWebhookHmac(rawBody, hmac)) {
-      reply.code(401);
-      return { ok: false, error: "Invalid webhook HMAC" };
+    const okHmac = verifyWebhookHmac(rawBody, hmac, env.SHOPIFY_CLIENT_SECRET);
+    if (!okHmac) {
+      return reply.code(401).send({ ok: false, error: "Invalid webhook HMAC" });
     }
 
-    const payloadText = rawBody.toString("utf8");
-    let payloadJson: unknown = {};
-    try {
-      payloadJson = payloadText ? JSON.parse(payloadText) : {};
-    } catch {
-      payloadJson = { _raw: payloadText };
-    }
+    const payloadJson = rawBody ? safeJsonParse(rawBody) : null;
 
-    await insertWebhookEvent({
+    const insertedRes = await insertWebhookEventIfNew({
       webhookId,
       shop,
       topic,
       apiVersion,
-      payload: payloadJson,
-      payloadRaw: payloadText,
-      headers: req.headers as any,
-      status: "received",
+      payloadJson,
+      payloadRaw: rawBody,
+      headersJson: headers,
     });
 
-    // Shopify exige 200 rápido
-    return { ok: true };
+    return reply.send({
+      ok: true,
+      inserted: insertedRes.inserted,
+      shop,
+      topic,
+      webhookId,
+    });
   });
-};
+}
+
+function safeJsonParse(raw: string) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return { _raw: raw };
+  }
+}

@@ -1,93 +1,66 @@
-import { env } from "../../env";
-import {
-  buildAdminGraphQLEndpoint,
-  buildAdminRestBase,
-  normalizeShopDomain,
-} from "./oauth";
+import { adminGraphQLEndpoint, adminRestBase, DEFAULT_API_VERSION, normalizeShop } from "./oauth";
 
-export type ShopifyAdminClient = {
-  shop: string;
-  apiVersion: string;
-  accessToken: string;
-  graphql<T = unknown>(
-    query: string,
-    variables?: Record<string, unknown>
-  ): Promise<T>;
-  rest<T = unknown>(path: string, init?: RequestInit): Promise<T>;
+type GraphQLResponse<T> = {
+  data?: T;
+  errors?: Array<{ message: string; extensions?: any }>;
 };
 
-export function createShopifyAdminClient(opts: {
-  shop: string;
-  accessToken: string;
-  apiVersion?: string;
-}): ShopifyAdminClient {
-  const shop = normalizeShopDomain(opts.shop);
-  const apiVersion = opts.apiVersion ?? env.SHOPIFY_API_VERSION;
-  const accessToken = opts.accessToken;
+export class ShopifyAdminClient {
+  private shop: string;
+  private accessToken: string;
+  private apiVersion: string;
 
-  const graphqlEndpoint = buildAdminGraphQLEndpoint(shop, apiVersion);
-  const restBase = buildAdminRestBase(shop, apiVersion);
+  constructor(params: { shop: string; accessToken: string; apiVersion?: string }) {
+    this.shop = normalizeShop(params.shop);
+    this.accessToken = params.accessToken;
+    this.apiVersion = params.apiVersion ?? DEFAULT_API_VERSION;
+  }
 
-  async function graphql<T = unknown>(
-    query: string,
-    variables?: Record<string, unknown>
-  ): Promise<T> {
-    const res = await fetch(graphqlEndpoint, {
+  async graphql<T>(query: string, variables?: Record<string, any>): Promise<T> {
+    const url = adminGraphQLEndpoint(this.shop, this.apiVersion);
+
+    const res = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Shopify-Access-Token": accessToken,
+        "X-Shopify-Access-Token": this.accessToken,
       },
       body: JSON.stringify({ query, variables }),
     });
 
-    const json = (await res.json().catch(() => null)) as any;
+    const json = (await res.json()) as GraphQLResponse<T>;
 
     if (!res.ok) {
-      const msg =
-        json?.errors?.[0]?.message ??
-        `GraphQL request failed: ${res.status} ${res.statusText}`;
-      throw new Error(msg);
+      throw new Error(`Shopify GraphQL HTTP ${res.status}: ${JSON.stringify(json)}`);
+    }
+    if (json.errors?.length) {
+      throw new Error(`Shopify GraphQL errors: ${JSON.stringify(json.errors)}`);
+    }
+    if (!json.data) {
+      throw new Error("Shopify GraphQL: empty data");
     }
 
-    if (json?.errors?.length) {
-      const msg = json.errors[0]?.message ?? "GraphQL error";
-      throw new Error(msg);
-    }
-
-    return json?.data as T;
+    return json.data;
   }
 
-  async function rest<T = unknown>(
-    path: string,
-    init?: RequestInit
-  ): Promise<T> {
-    const url = `${restBase}${path.startsWith("/") ? "" : "/"}${path}`;
+  async restGet<T>(path: string): Promise<T> {
+    const base = adminRestBase(this.shop, this.apiVersion);
+    const url = `${base}${path}`;
 
     const res = await fetch(url, {
-      ...init,
+      method: "GET",
       headers: {
-        "X-Shopify-Access-Token": accessToken,
-        ...(init?.headers ?? {}),
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": this.accessToken,
       },
     });
 
-    const text = await res.text().catch(() => "");
-    const data = text ? JSON.parse(text) : null;
+    const json = (await res.json()) as T;
 
     if (!res.ok) {
-      const msg =
-        data?.errors ??
-        data?.error ??
-        `REST request failed: ${res.status} ${res.statusText}`;
-      throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+      throw new Error(`Shopify REST HTTP ${res.status}: ${JSON.stringify(json)}`);
     }
 
-    return data as T;
+    return json;
   }
-
-  return { shop, apiVersion, accessToken, graphql, rest };
 }
-
-// Alias compatível com imports antigos (pra não quebrar)
-export const createAdminClient = createShopifyAdminClient;

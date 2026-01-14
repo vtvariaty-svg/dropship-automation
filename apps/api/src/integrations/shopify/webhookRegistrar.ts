@@ -1,84 +1,54 @@
-import { env } from "../../env";
-import { createAdminClient } from "./adminClient";
+import { ShopifyAdminClient } from "./adminClient";
 
-export type WebhookTopic =
-  | "app/uninstalled"
-  | "orders/create"
-  | "orders/updated"
-  | "orders/paid"
-  | "orders/cancelled"
-  | "fulfillments/create"
-  | "fulfillments/update"
-  | "products/create"
-  | "products/update"
-  | "products/delete";
-
-export type WebhookRegistration = {
-  topic: WebhookTopic;
-  address: string;
+export type WebhookToRegister = {
+  topic: string; // ex: "app/uninstalled"
+  callbackUrl: string;
 };
 
-export function buildWebhookCallbackUrl(): string {
-  // endpoint do seu backend que recebe webhooks
-  // (POST /shopify/webhooks)
-  return `${env.BASE_URL}/shopify/webhooks`;
-}
+export async function registerWebhooks(client: ShopifyAdminClient, webhooks: WebhookToRegister[]) {
+  // Admin GraphQL mutation oficial: webhookSubscriptionCreate
+  const mutation = `
+    mutation webhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $callbackUrl: URL!) {
+      webhookSubscriptionCreate(topic: $topic, webhookSubscription: { callbackUrl: $callbackUrl, format: JSON }) {
+        webhookSubscription { id topic endpoint { __typename } }
+        userErrors { field message }
+      }
+    }
+  `;
 
-async function registerWebhook(opts: {
-  shop: string;
-  accessToken: string;
-  topic: WebhookTopic;
-  address: string;
-}): Promise<void> {
-  const admin = createAdminClient({
-    shop: opts.shop,
-    accessToken: opts.accessToken,
-  });
+  for (const w of webhooks) {
+    const variables = {
+      topic: topicToGraphQLEnum(w.topic),
+      callbackUrl: w.callbackUrl,
+    };
 
-  // REST create webhook
-  await admin.rest("/webhooks.json", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      webhook: {
-        topic: opts.topic,
-        address: opts.address,
-        format: "json",
-      },
-    }),
-  });
-}
+    const data = await client.graphql<{
+      webhookSubscriptionCreate: {
+        webhookSubscription: { id: string; topic: string } | null;
+        userErrors: Array<{ field: string[] | null; message: string }>;
+      };
+    }>(mutation, variables);
 
-export async function registerDefaultWebhooks(opts: {
-  shop: string;
-  accessToken: string;
-}): Promise<{ ok: true; registered: WebhookRegistration[] }> {
-  const address = buildWebhookCallbackUrl();
-
-  // escolha o conjunto mínimo pra dropshipping / automação
-  const topics: WebhookTopic[] = [
-    "app/uninstalled",
-    "orders/create",
-    "orders/updated",
-    "orders/paid",
-    "orders/cancelled",
-    "fulfillments/create",
-    "fulfillments/update",
-    "products/create",
-    "products/update",
-    "products/delete",
-  ];
-
-  const registered: WebhookRegistration[] = [];
-  for (const topic of topics) {
-    await registerWebhook({
-      shop: opts.shop,
-      accessToken: opts.accessToken,
-      topic,
-      address,
-    });
-    registered.push({ topic, address });
+    const errors = data.webhookSubscriptionCreate.userErrors;
+    if (errors.length) {
+      throw new Error(`Webhook register failed: ${JSON.stringify(errors)}`);
+    }
   }
 
-  return { ok: true, registered };
+  return { ok: true };
+}
+
+/**
+ * Shopify GraphQL espera enum do tipo WebhookSubscriptionTopic
+ * Ex: "APP_UNINSTALLED"
+ */
+function topicToGraphQLEnum(topic: string) {
+  // você pode expandir conforme for adicionando
+  switch (topic) {
+    case "app/uninstalled":
+      return "APP_UNINSTALLED";
+    default:
+      // fallback simples: app/uninstalled -> APP_UNINSTALLED
+      return topic.toUpperCase().replace(/\//g, "_").replace(/\./g, "_");
+  }
 }

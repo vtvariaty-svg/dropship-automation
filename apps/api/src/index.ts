@@ -1,28 +1,40 @@
 import Fastify from "fastify";
-import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 
-import { shopifyAdminRoutes } from "./routes/shopifyAdmin";
 import { env } from "./env";
-import { shopifyRoutes } from "./routes/shopify";
-import { rootRoutes } from "./routes/root";
-import { shopifyWebhooksRoutes } from "./routes/shopifyWebhooks";
 
+import { shopContextPlugin } from "./plugins/shopContext";
+
+import { rootRoutes } from "./routes/root";
+import { shopifyRoutes } from "./routes/shopify";
+import { shopifyAdminRoutes } from "./routes/shopifyAdmin";
+import { shopifyWebhooksRoutes } from "./routes/shopifyWebhooks";
 
 async function bootstrap() {
   const app = Fastify({ logger: true });
 
-  await app.register(cors, { origin: true, credentials: true });
   await app.register(cookie);
 
-  await app.register(rootRoutes);
-  // Webhooks devem ser registrados antes de rotas que também parseiam JSON, para manter o rawBody isolado.
-  await app.register(shopifyWebhooksRoutes);
+  // Context loader (shop + token via DB, quando aplicável)
+  await app.register(shopContextPlugin);
 
+  // rotas básicas
+  await app.register(rootRoutes);
+
+  // OAuth install/callback
   await app.register(shopifyRoutes);
+
+  // Admin API (REST/GraphQL) endpoints
   await app.register(shopifyAdminRoutes);
 
-  await app.listen({ port: env.PORT, host: "0.0.0.0" });
+  // Webhooks receiver
+  await app.register(shopifyWebhooksRoutes);
+
+  await app.listen({
+    port: env.PORT,
+    host: "0.0.0.0",
+  });
+
   app.log.info(`API running on port ${env.PORT}`);
 }
 
