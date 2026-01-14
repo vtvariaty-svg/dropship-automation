@@ -1,87 +1,72 @@
 import { env } from "../../env";
 
-export type ShopifyGraphQLResponse<T> = {
-  data?: T;
-  errors?: Array<{ message: string; extensions?: unknown }>;
-};
+type Json = Record<string, unknown>;
 
 export class ShopifyAdminClient {
   private shop: string;
   private accessToken: string;
+  private apiVersion: string;
 
-  constructor(params: { shop: string; accessToken: string }) {
+  constructor(params: { shop: string; accessToken: string; apiVersion?: string }) {
     this.shop = params.shop;
     this.accessToken = params.accessToken;
+    this.apiVersion = params.apiVersion ?? env.SHOPIFY_API_VERSION;
   }
 
-  private graphqlUrl(): string {
-    return `https://${this.shop}/admin/api/${env.SHOPIFY_API_VERSION}/graphql.json`;
+  private baseUrl() {
+    return `https://${this.shop}`;
   }
 
-  private async sleep(ms: number) {
-    await new Promise((r) => setTimeout(r, ms));
-  }
+  async rest<T = any>(params: {
+    method: "GET" | "POST" | "PUT" | "DELETE";
+    path: string; // ex: /webhooks.json
+    body?: unknown;
+  }): Promise<T> {
+    const url = `${this.baseUrl()}/admin/api/${this.apiVersion}${params.path}`;
+    const res = await fetch(url, {
+      method: params.method,
+      headers: {
+        "X-Shopify-Access-Token": this.accessToken,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+      },
+      body: params.body ? JSON.stringify(params.body) : undefined,
+    });
 
-  private computeBackoffMs(attempt: number): number {
-    // 1.5s, 3s, 6s, 12s... cap 15s
-    return Math.min(1500 * Math.pow(2, attempt), 15000);
-  }
-
-  async graphql<T>(
-    query: string,
-    variables: Record<string, unknown> = {},
-    opts: { retries?: number } = {}
-  ): Promise<T> {
-    const retries = typeof opts.retries === "number" ? opts.retries : 3;
-
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      const res = await fetch(this.graphqlUrl(), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": this.accessToken,
-        },
-        body: JSON.stringify({ query, variables }),
-      });
-
-      // Retry em 429 (rate limit) e 5xx
-      if (res.status === 429 || (res.status >= 500 && res.status <= 599)) {
-        const retryAfterHeader = res.headers.get("retry-after");
-        const retryAfterMs = retryAfterHeader ? Number(retryAfterHeader) * 1000 : 0;
-        const backoffMs = this.computeBackoffMs(attempt);
-        const waitMs = Math.max(retryAfterMs, backoffMs);
-
-        if (attempt === retries) {
-          const body = await res.text().catch(() => "");
-          throw new Error(`Shopify GraphQL failed. status=${res.status} body=${body}`);
-        }
-
-        await this.sleep(waitMs);
-        continue;
-      }
-
-      const json = (await res.json().catch(() => ({}))) as ShopifyGraphQLResponse<T>;
-
-      if (!res.ok) {
-        throw new Error(
-          `Shopify GraphQL HTTP error. status=${res.status} message=${
-            json.errors?.[0]?.message ?? "unknown"
-          }`
-        );
-      }
-
-      if (json.errors?.length) {
-        throw new Error(`Shopify GraphQL errors: ${json.errors.map((e) => e.message).join(" | ")}`);
-      }
-
-      if (!json.data) {
-        throw new Error("Shopify GraphQL: missing data");
-      }
-
-      return json.data;
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Shopify REST ${params.method} ${params.path} failed: ${res.status} ${text}`);
     }
 
-    // unreachable
-    throw new Error("Shopify GraphQL: unexpected");
+    return (await res.json()) as T;
   }
+
+  async listWebhooks(): Promise<{ id: number; topic: string; address: string }[]> {
+    const data = await this.rest<{ webhooks: { id: number; topic: string; address: string }[] }>({
+      method: "GET",
+      path: "/webhooks.json",
+    });
+    return data.webhooks ?? [];
+  }
+
+  async createWebhook(params: { topic: string; address: string }): Promise<{ id: number }> {
+    const data = await this.rest<{ webhook: { id: number } }>({
+      method: "POST",
+      path: "/webhooks.json",
+      body: {
+        webhook: {
+          topic: params.topic,
+          address: params.address,
+          format: "json",
+        },
+      },
+    });
+    return data.webhook;
+  }
+}
+
+export function buildWebhookCallbackUrl() {
+  // BASE_URL deve ser https://... (Render)
+  const base = env.BASE_URL.replace(/\/$/, "");
+  return `${base}/shopify/webhooks`;
 }

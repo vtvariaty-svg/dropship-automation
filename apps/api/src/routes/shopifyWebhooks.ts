@@ -1,60 +1,91 @@
 import type { FastifyInstance } from "fastify";
-import { verifyShopifyWebhookHmac } from "../integrations/shopify/webhooks";
-import { insertWebhookEventIfNew } from "../integrations/shopify/webhookStore";
+import crypto from "node:crypto";
+import { env } from "../env";
+import { insertWebhookEvent } from "../integrations/shopify/webhookStore";
 
-export async function shopifyWebhookRoutes(app: FastifyInstance) {
-  /**
-   * ✅ PROD: receiver oficial Shopify
-   * POST /shopify/webhooks
-   */
+function timingSafeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ab, bb);
+}
+
+function verifyShopifyHmac(params: {
+  rawBody: Buffer;
+  hmacHeader: string | undefined;
+  sharedSecret: string;
+}): boolean {
+  const header = params.hmacHeader;
+  if (!header) return false;
+  const digest = crypto
+    .createHmac("sha256", params.sharedSecret)
+    .update(params.rawBody)
+    .digest("base64");
+  return timingSafeEqual(digest, header);
+}
+
+/**
+ * Webhook receiver (Shopify -> sua API)
+ *
+ * Shopify chama via POST. GET dá 404 (normal).
+ */
+export async function shopifyWebhooksRoutes(app: FastifyInstance) {
+  // Parser somente nesse escopo: precisamos do body em Buffer p/ validar HMAC.
+  app.addContentTypeParser(
+    "application/json",
+    { parseAs: "buffer" },
+    (req, body, done) => {
+      done(null, body);
+    }
+  );
+
   app.post("/shopify/webhooks", async (req, reply) => {
-    const shop = String(req.headers["x-shopify-shop-domain"] ?? "").trim().toLowerCase();
-    const topic = String(req.headers["x-shopify-topic"] ?? "").trim();
-    const webhookId = String(req.headers["x-shopify-webhook-id"] ?? "").trim();
-    const apiVersion = String(req.headers["x-shopify-api-version"] ?? "").trim() || null;
+    const rawBody = req.body as Buffer;
 
-    const hmacHeader = String(req.headers["x-shopify-hmac-sha256"] ?? "").trim() || undefined;
-
-    const rawBody = String((req as any).rawBody ?? "");
+    const shop = (req.headers["x-shopify-shop-domain"] as string | undefined) ?? null;
+    const topic = (req.headers["x-shopify-topic"] as string | undefined) ?? null;
+    const webhookId = (req.headers["x-shopify-webhook-id"] as string | undefined) ?? null;
+    const apiVersion = (req.headers["x-shopify-api-version"] as string | undefined) ?? null;
+    const hmac = req.headers["x-shopify-hmac-sha256"] as string | undefined;
 
     if (!shop || !topic || !webhookId) {
       return reply.code(400).send({
         ok: false,
-        error: "Missing required webhook headers (shop/topic/webhook-id).",
+        error: "Missing required webhook headers (shop/topic/webhook-id)",
       });
     }
 
-    const okHmac = verifyShopifyWebhookHmac({ rawBody, hmacHeader });
-    if (!okHmac) {
+    const isValid = verifyShopifyHmac({
+      rawBody,
+      hmacHeader: hmac,
+      sharedSecret: env.SHOPIFY_CLIENT_SECRET,
+    });
+
+    if (!isValid) {
+      // Não armazena payload inválido (pode ser ataque)
       return reply.code(401).send({ ok: false, error: "Invalid webhook HMAC" });
     }
 
-    const payloadJson = req.body ?? {};
+    let payload: unknown = null;
+    try {
+      payload = JSON.parse(rawBody.toString("utf8"));
+    } catch {
+      // Shopify envia JSON; se falhar, registra raw mesmo assim
+      payload = null;
+    }
 
-    const headersJson: Record<string, unknown> = {
-      "x-shopify-topic": topic,
-      "x-shopify-shop-domain": shop,
-      "x-shopify-webhook-id": webhookId,
-      "x-shopify-api-version": apiVersion,
-      "user-agent": req.headers["user-agent"] ?? null,
-    };
-
-    const { inserted } = await insertWebhookEventIfNew({
+    await insertWebhookEvent({
       webhookId,
       shop,
       topic,
+      payload,
+      headers: req.headers,
+      status: "received",
       apiVersion,
-      payloadJson,
-      payloadRaw: rawBody,
-      headersJson,
+      payloadRaw: rawBody.toString("utf8"),
     });
 
-    return reply.code(200).send({
-      ok: true,
-      inserted,
-      shop,
-      topic,
-      webhookId,
-    });
+    // Shopify espera 200 rápido.
+    return reply.code(200).send({ ok: true });
   });
 }

@@ -1,82 +1,64 @@
 import type { FastifyInstance } from "fastify";
-import { ShopifyAdminClient } from "../integrations/shopify/adminClient";
-import { insertWebhookEventIfNew } from "../integrations/shopify/webhookStore";
+import { insertWebhookEvent, listWebhookEvents } from "../integrations/shopify/webhookStore";
+import crypto from "node:crypto";
 
+function randomId(prefix = "dbg") {
+  return `${prefix}_${crypto.randomBytes(8).toString("hex")}`;
+}
+
+/**
+ * Rotas de DEBUG (não usadas pelo Shopify).
+ * - /__debug/webhooks/ingest ... cria evento fake no banco
+ * - /__debug/webhooks/list?shop=... lista os últimos eventos
+ */
 export async function shopifyWebhooksDebugRoutes(app: FastifyInstance) {
-  /**
-   * ✅ DEBUG: lista webhooks cadastrados na Shopify (Admin API)
-   * Use: GET /_debug/webhooks/list?shop=xxx.myshopify.com
-   */
-  app.get("/_debug/webhooks/list", async (req, reply) => {
-    if (!req.shopContext) {
-      return reply.code(401).send({ ok: false, error: "No shop context" });
+  app.addContentTypeParser(
+    "application/json",
+    { parseAs: "string" },
+    (req, body, done) => {
+      done(null, body);
+    }
+  );
+
+  app.post("/__debug/webhooks/ingest", async (req, reply) => {
+    const shop = (req.query as any)?.shop as string | undefined;
+    const topic = ((req.query as any)?.topic as string | undefined) ?? "debug/test";
+    if (!shop) {
+      return reply.code(400).send({ ok: false, error: "Missing ?shop=" });
     }
 
-    const client = new ShopifyAdminClient({
-      shop: req.shopContext.shop,
-      accessToken: req.shopContext.accessToken,
+    const raw = typeof req.body === "string" ? req.body : JSON.stringify(req.body ?? {});
+    let payload: unknown = null;
+    try {
+      payload = JSON.parse(raw);
+    } catch {
+      payload = null;
+    }
+
+    const webhookId = randomId("debug");
+
+    const result = await insertWebhookEvent({
+      webhookId,
+      shop,
+      topic,
+      payload,
+      headers: req.headers,
+      status: "debug",
+      apiVersion: null,
+      payloadRaw: raw,
     });
 
-    const data = await client.graphql<{
-      webhookSubscriptions: {
-        edges: Array<{
-          node: {
-            id: string;
-            topic: string;
-            endpoint: { __typename: string; callbackUrl?: string | null };
-          };
-        }>;
-      };
-    }>(`
-      query {
-        webhookSubscriptions(first: 50) {
-          edges {
-            node {
-              id
-              topic
-              endpoint {
-                __typename
-                ... on WebhookHttpEndpoint { callbackUrl }
-              }
-            }
-          }
-        }
-      }
-    `);
-
-    const list = data.webhookSubscriptions.edges.map((e) => ({
-      id: e.node.id,
-      topic: e.node.topic,
-      callbackUrl: (e.node.endpoint as any)?.callbackUrl ?? null,
-    }));
-
-    return reply.send({ ok: true, count: list.length, list });
+    return reply.send({ ok: true, inserted: result.inserted, webhookId });
   });
 
-  /**
-   * ✅ DEBUG: grava um evento fake no Neon (prova insert + tabela ok)
-   * Use: POST /_debug/webhooks/ingest?shop=xxx.myshopify.com
-   */
-  app.post("/_debug/webhooks/ingest", async (req, reply) => {
-    const shopRaw =
-      (req.query as any)?.shop ?? (req.headers["x-shopify-shop-domain"] as string | undefined);
-
-    const shop = String(shopRaw ?? "").trim().toLowerCase();
-    if (!shop) return reply.code(400).send({ ok: false, error: "Missing shop" });
-
-    const rawBody = String((req as any).rawBody ?? JSON.stringify(req.body ?? {}));
-    const payloadJson = req.body ?? {};
-
-    const { inserted } = await insertWebhookEventIfNew({
-      webhookId: `debug-${Date.now()}`,
-      shop,
-      topic: "debug/test",
-      apiVersion: null,
-      payloadJson,
-      payloadRaw: rawBody,
-      headersJson: { debug: true },
-    });
-
-    return reply.send({ ok: true, inserted });
+  app.get("/__debug/webhooks/list", async (req, reply) => {
+    const shop = (req.query as any)?.shop as string | undefined;
+    const limitRaw = (req.query as any)?.limit as string | undefined;
+    if (!shop) {
+      return reply.code(400).send({ ok: false, error: "Missing ?shop=" });
+    }
+    const limit = limitRaw ? Math.max(1, Math.min(100, Number(limitRaw))) : 20;
+    const rows = await listWebhookEvents({ shop, limit });
+    return reply.send({ ok: true, rows });
   });
 }

@@ -1,77 +1,45 @@
-import { ShopifyAdminClient } from "./adminClient";
+import { ShopifyAdminClient, buildWebhookCallbackUrl } from "./adminClient";
 
-const WEBHOOK_CALLBACK_URL =
-  "https://cliquebuy-automation-api.onrender.com/shopify/webhooks";
+/**
+ * Opção 1 (recomendada agora): registrar Webhooks via REST Admin API
+ * - Simples
+ * - Funciona em qualquer app
+ * - Fácil de depurar
+ */
 
-type WebhookTopic =
-  | "ORDERS_CREATE"
-  | "ORDERS_PAID"
-  | "APP_UNINSTALLED";
+const CORE_WEBHOOKS = [
+  {
+    topic: "app/uninstalled",
+  },
+] as const;
 
-const TOPIC_MAP: Record<WebhookTopic, string> = {
-  ORDERS_CREATE: "ORDERS_CREATE",
-  ORDERS_PAID: "ORDERS_PAID",
-  APP_UNINSTALLED: "APP_UNINSTALLED",
-};
+export async function ensureCoreWebhooks(params: {
+  shop: string;
+  accessToken: string;
+}): Promise<{ created: string[]; existing: string[]; callbackUrl: string }> {
+  const client = new ShopifyAdminClient({
+    shop: params.shop,
+    accessToken: params.accessToken,
+  });
+  const callbackUrl = buildWebhookCallbackUrl();
+  const existing = await client.listWebhooks();
 
-export async function ensureWebhooks(client: ShopifyAdminClient) {
-  const query = `
-    query {
-      webhookSubscriptions(first: 100) {
-        edges {
-          node {
-            id
-            topic
-            endpoint {
-              __typename
-              ... on WebhookHttpEndpoint {
-                callbackUrl
-              }
-            }
-          }
-        }
-      }
+  const createdTopics: string[] = [];
+  const existingTopics: string[] = [];
+
+  for (const wh of CORE_WEBHOOKS) {
+    const already = existing.find((w) => w.topic === wh.topic && w.address === callbackUrl);
+    if (already) {
+      existingTopics.push(wh.topic);
+      continue;
     }
-  `;
 
-  const existing = await client.graphql<any>(query);
-
-  const existingSet = new Set(
-    existing.webhookSubscriptions.edges.map(
-      (e: any) => `${e.node.topic}:${e.node.endpoint.callbackUrl}`
-    )
-  );
-
-  const mutations: Array<{ topic: string }> = [
-    { topic: "ORDERS_CREATE" },
-    { topic: "ORDERS_PAID" },
-    { topic: "APP_UNINSTALLED" },
-  ];
-
-  for (const { topic } of mutations) {
-    const key = `${topic}:${WEBHOOK_CALLBACK_URL}`;
-    if (existingSet.has(key)) continue;
-
-    const mutation = `
-      mutation {
-        webhookSubscriptionCreate(
-          topic: ${topic},
-          webhookSubscription: {
-            callbackUrl: "${WEBHOOK_CALLBACK_URL}",
-            format: JSON
-          }
-        ) {
-          webhookSubscription {
-            id
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
-
-    await client.graphql<any>(mutation);
+    await client.createWebhook({
+      topic: wh.topic,
+      address: callbackUrl,
+    });
+    createdTopics.push(wh.topic);
   }
+
+  return { created: createdTopics, existing: existingTopics, callbackUrl };
 }
