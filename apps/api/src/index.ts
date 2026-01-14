@@ -7,7 +7,7 @@ import { env } from "./env";
 import { shopifyRoutes } from "./routes/shopify";
 import { rootRoutes } from "./routes/root";
 import { shopifyWebhooksRoutes } from "./routes/shopifyWebhooks";
-import { shopifyWebhooksDebugRoutes } from "./routes/shopifyWebhooksDebug";
+
 
 async function bootstrap() {
   const app = Fastify({ logger: true });
@@ -18,7 +18,7 @@ async function bootstrap() {
   await app.register(rootRoutes);
   // Webhooks devem ser registrados antes de rotas que também parseiam JSON, para manter o rawBody isolado.
   await app.register(shopifyWebhooksRoutes);
-  await app.register(shopifyWebhooksDebugRoutes);
+
   await app.register(shopifyRoutes);
   await app.register(shopifyAdminRoutes);
 
