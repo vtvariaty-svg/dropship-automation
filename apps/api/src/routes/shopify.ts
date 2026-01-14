@@ -1,78 +1,70 @@
 import type { FastifyInstance } from "fastify";
-import { env } from "../env";
 import {
-  buildInstallUrl,
-  exchangeCodeForToken,
-  isValidShop,
-  randomState,
   SHOPIFY_STATE_COOKIE,
+  buildInstallUrl,
   verifyHmac,
+  exchangeCodeForToken,
+  registerWebhooksForShop,
 } from "../integrations/shopify/oauth";
-import { upsertShopifyConnection } from "../integrations/shopify/store";
+import { saveShopToken } from "../integrations/shopify/store";
 
 export async function shopifyRoutes(app: FastifyInstance) {
+  /**
+   * GET /shopify/install?shop=xxx.myshopify.com
+   */
   app.get("/shopify/install", async (req, reply) => {
-    const shop = String((req.query as any)?.shop ?? "").trim();
-    if (!isValidShop(shop)) {
-      return reply.code(400).send({ ok: false, error: "Invalid shop" });
+    const shop = String((req.query as any).shop ?? "").toLowerCase();
+
+    if (!shop) {
+      return reply.code(400).send({ ok: false, error: "Missing shop" });
     }
 
-    const state = randomState();
+    const state = crypto.randomUUID();
 
     reply.setCookie(SHOPIFY_STATE_COOKIE, state, {
       httpOnly: true,
       sameSite: "lax",
-      secure: env.NODE_ENV === "production",
       path: "/",
-      maxAge: 600,
     });
 
-    const redirectUrl = buildInstallUrl(shop, state);
-
-    // ✅ Fastify nessa versão espera (url, code?)
-    return reply.redirect(redirectUrl); // ou reply.redirect(redirectUrl, 302)
+    const installUrl = buildInstallUrl(shop, state);
+    return reply.redirect(installUrl);
   });
 
+  /**
+   * GET /shopify/callback
+   */
   app.get("/shopify/callback", async (req, reply) => {
-    const q = req.query as Record<string, any>;
+    const query = req.query as Record<string, string>;
+    const { shop, hmac, code, state } = query;
 
-    const shop = String(q.shop ?? "").trim();
-    const code = String(q.code ?? "").trim();
-    const state = String(q.state ?? "").trim();
-
-    if (!isValidShop(shop) || !code || !state) {
-      return reply.code(400).send({ ok: false, error: "Invalid callback params" });
+    if (!shop || !hmac || !code || !state) {
+      return reply.code(400).send({ ok: false, error: "Missing parameters" });
     }
 
-    const cookieState = (req.cookies as any)?.[SHOPIFY_STATE_COOKIE];
-    if (!cookieState || cookieState !== state) {
-      return reply.code(401).send({ ok: false, error: "Invalid state" });
+    const storedState = req.cookies[SHOPIFY_STATE_COOKIE];
+    if (!storedState || storedState !== state) {
+      return reply.code(400).send({ ok: false, error: "Invalid state" });
     }
 
-    if (!verifyHmac(q)) {
+    const valid = verifyHmac(query, hmac);
+    if (!valid) {
       return reply.code(401).send({ ok: false, error: "Invalid HMAC" });
     }
 
     const accessToken = await exchangeCodeForToken(shop, code);
 
-    await upsertShopifyConnection({
+    // Persist token
+    await saveShopToken({
       shop,
       accessToken,
-      scopes: env.SHOPIFY_SCOPES,
     });
+
+    // 🔥 REGISTRA WEBHOOKS (2 argumentos corretos)
+    await registerWebhooksForShop(shop, accessToken);
 
     reply.clearCookie(SHOPIFY_STATE_COOKIE, { path: "/" });
 
     return reply.send({ ok: true, shop });
-  });
-
-  app.get("/shopify/connection", async (req, reply) => {
-    const shop = String((req.query as any)?.shop ?? "").trim();
-    if (!isValidShop(shop)) {
-      return reply.code(400).send({ ok: false, error: "Invalid shop" });
-    }
-
-    // MVP: endpoint existe (no próximo passo, fazemos leitura real no Postgres)
-    return reply.send({ ok: true, shop, connected: true });
   });
 }
