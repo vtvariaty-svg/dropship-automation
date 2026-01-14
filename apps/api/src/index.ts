@@ -6,12 +6,12 @@ import { env } from "./env";
 
 import { rootRoutes } from "./routes/root";
 import { shopifyRoutes } from "./routes/shopify";
-import { shopifyAdminRoutes } from "./routes/shopifyAdmin";
 import { shopifyWebhookRoutes } from "./routes/shopifyWebhooks";
+import { shopifyWebhooksDebugRoutes } from "./routes/shopifyWebhooksDebug";
 
 import { loadShopContext } from "./integrations/shopify/context";
 import { runMigrations } from "./db/migrate";
-import { shopifyWebhooksDebugRoutes } from "./routes/shopifyWebhooksDebug";
+
 async function bootstrap() {
   const app = Fastify({ logger: true });
 
@@ -68,12 +68,12 @@ async function bootstrap() {
 
   // Shopify
   await app.register(shopifyRoutes);
-  await app.register(shopifyAdminRoutes);
+  
 
   // ✅ Webhooks
-  await app.register(shopifyWebhookRoutes);
 
-  await app.register(shopifyWebhooksDebugRoutes);
+await app.register(shopifyWebhookRoutes);
+await app.register(shopifyWebhooksDebugRoutes);
 
   await app.listen({ port: env.PORT, host: "0.0.0.0" });
   app.log.info(`API running on port ${env.PORT}`);
