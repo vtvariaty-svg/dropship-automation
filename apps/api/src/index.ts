@@ -2,6 +2,7 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 
+import { shopifyAdminRoutes } from "./routes/shopifyAdmin";
 import { env } from "./env";
 import { shopifyRoutes } from "./routes/shopify";
 import { rootRoutes } from "./routes/root";
@@ -19,6 +20,7 @@ async function bootstrap() {
   await app.register(shopifyWebhooksRoutes);
   await app.register(shopifyWebhooksDebugRoutes);
   await app.register(shopifyRoutes);
+  await app.register(shopifyAdminRoutes);
 
   await app.listen({ port: env.PORT, host: "0.0.0.0" });
   app.log.info(`API running on port ${env.PORT}`);

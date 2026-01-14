@@ -1,45 +1,84 @@
-import { ShopifyAdminClient, buildWebhookCallbackUrl } from "./adminClient";
+import { env } from "../../env";
+import { createAdminClient } from "./adminClient";
 
-/**
- * Opção 1 (recomendada agora): registrar Webhooks via REST Admin API
- * - Simples
- * - Funciona em qualquer app
- * - Fácil de depurar
- */
+export type WebhookTopic =
+  | "app/uninstalled"
+  | "orders/create"
+  | "orders/updated"
+  | "orders/paid"
+  | "orders/cancelled"
+  | "fulfillments/create"
+  | "fulfillments/update"
+  | "products/create"
+  | "products/update"
+  | "products/delete";
 
-const CORE_WEBHOOKS = [
-  {
-    topic: "app/uninstalled",
-  },
-] as const;
+export type WebhookRegistration = {
+  topic: WebhookTopic;
+  address: string;
+};
 
-export async function ensureCoreWebhooks(params: {
+export function buildWebhookCallbackUrl(): string {
+  // endpoint do seu backend que recebe webhooks
+  // (POST /shopify/webhooks)
+  return `${env.BASE_URL}/shopify/webhooks`;
+}
+
+async function registerWebhook(opts: {
   shop: string;
   accessToken: string;
-}): Promise<{ created: string[]; existing: string[]; callbackUrl: string }> {
-  const client = new ShopifyAdminClient({
-    shop: params.shop,
-    accessToken: params.accessToken,
+  topic: WebhookTopic;
+  address: string;
+}): Promise<void> {
+  const admin = createAdminClient({
+    shop: opts.shop,
+    accessToken: opts.accessToken,
   });
-  const callbackUrl = buildWebhookCallbackUrl();
-  const existing = await client.listWebhooks();
 
-  const createdTopics: string[] = [];
-  const existingTopics: string[] = [];
+  // REST create webhook
+  await admin.rest("/webhooks.json", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      webhook: {
+        topic: opts.topic,
+        address: opts.address,
+        format: "json",
+      },
+    }),
+  });
+}
 
-  for (const wh of CORE_WEBHOOKS) {
-    const already = existing.find((w) => w.topic === wh.topic && w.address === callbackUrl);
-    if (already) {
-      existingTopics.push(wh.topic);
-      continue;
-    }
+export async function registerDefaultWebhooks(opts: {
+  shop: string;
+  accessToken: string;
+}): Promise<{ ok: true; registered: WebhookRegistration[] }> {
+  const address = buildWebhookCallbackUrl();
 
-    await client.createWebhook({
-      topic: wh.topic,
-      address: callbackUrl,
+  // escolha o conjunto mínimo pra dropshipping / automação
+  const topics: WebhookTopic[] = [
+    "app/uninstalled",
+    "orders/create",
+    "orders/updated",
+    "orders/paid",
+    "orders/cancelled",
+    "fulfillments/create",
+    "fulfillments/update",
+    "products/create",
+    "products/update",
+    "products/delete",
+  ];
+
+  const registered: WebhookRegistration[] = [];
+  for (const topic of topics) {
+    await registerWebhook({
+      shop: opts.shop,
+      accessToken: opts.accessToken,
+      topic,
+      address,
     });
-    createdTopics.push(wh.topic);
+    registered.push({ topic, address });
   }
 
-  return { created: createdTopics, existing: existingTopics, callbackUrl };
+  return { ok: true, registered };
 }

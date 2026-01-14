@@ -1,85 +1,157 @@
-import crypto from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { env } from "../../env";
 
-export function randomState(): string {
-  return crypto.randomBytes(16).toString("hex");
+/**
+ * OAuth helpers.
+ *
+ * IMPORTANT:
+ * - Keep this module side-effect free (no top-level await / writes).
+ * - For the OAuth callback validation, Shopify sends the HMAC as HEX.
+ */
+
+export function normalizeShopDomain(shop: string): string {
+  const s = (shop ?? "").trim().toLowerCase();
+  if (!s) return "";
+  if (s.endsWith(".myshopify.com")) return s;
+  return `${s}.myshopify.com`;
 }
 
-export function isValidShop(shop: unknown): shop is string {
-  if (typeof shop !== "string") return false;
-  // Aceita myshopify.com e também subdomínios dev
-  return /^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/.test(shop);
+export function buildAdminGraphQLEndpoint(
+  shop: string,
+  apiVersion: string = env.SHOPIFY_API_VERSION
+): string {
+  const domain = normalizeShopDomain(shop);
+  return `https://${domain}/admin/api/${apiVersion}/graphql.json`;
+}
+
+export function buildAdminRestBase(
+  shop: string,
+  apiVersion: string = env.SHOPIFY_API_VERSION
+): string {
+  const domain = normalizeShopDomain(shop);
+  return `https://${domain}/admin/api/${apiVersion}`;
+}
+
+export function generateOauthState(): string {
+  return randomBytes(16).toString("hex");
+}
+
+export function buildInstallUrlWithOptions(opts: {
+  shop: string;
+  state: string;
+  redirectUri: string;
+  scopes?: string;
+}): string {
+  const shop = normalizeShopDomain(opts.shop);
+  const scope = (opts.scopes ?? env.SHOPIFY_SCOPES)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .join(",");
+
+  const url = new URL(`https://${shop}/admin/oauth/authorize`);
+  url.searchParams.set("client_id", env.SHOPIFY_CLIENT_ID);
+  url.searchParams.set("scope", scope);
+  url.searchParams.set("redirect_uri", opts.redirectUri);
+  url.searchParams.set("state", opts.state);
+  return url.toString();
 }
 
 /**
- * Verifica HMAC do OAuth (querystring) conforme Shopify.
- * - Remove 'hmac' e 'signature'
- * - Ordena params
- * - Concatena como "k=v&k2=v2"
- * - HMAC-SHA256 usando SHOPIFY_CLIENT_SECRET e compara em hex
+ * Shopify OAuth callback HMAC validation.
+ *
+ * Shopify signs the query string (excluding `hmac` and `signature`), sorted by key.
  */
-export function verifyHmac(query: Record<string, unknown>): boolean {
-  const hmac = typeof query.hmac === "string" ? query.hmac : "";
-  if (!hmac) return false;
+export function validateOauthHmac(rawQuery: Record<string, unknown>): boolean {
+  const query: Record<string, unknown> = { ...rawQuery };
+  const hmac = query.hmac;
+  delete query.hmac;
+  delete query.signature;
 
-  const filtered: Record<string, string> = {};
-  for (const [k, v] of Object.entries(query)) {
-    if (k === "hmac" || k === "signature") continue;
-    if (v == null) continue;
-    filtered[k] = String(v);
-  }
+  if (typeof hmac !== "string" || !hmac) return false;
 
-  const message = Object.keys(filtered)
+  const message = Object.keys(query)
+    .filter((k) => query[k] !== undefined && query[k] !== null)
     .sort()
-    .map((k) => `${k}=${encodeURIComponent(filtered[k]).replace(/%20/g, "+")}`)
+    .map((k) => {
+      const v = query[k];
+      if (Array.isArray(v)) return `${k}=${v.join(",")}`;
+      return `${k}=${String(v)}`;
+    })
     .join("&");
 
-  const digest = crypto
-    .createHmac("sha256", env.SHOPIFY_CLIENT_SECRET)
+  const computed = createHmac("sha256", env.SHOPIFY_CLIENT_SECRET)
     .update(message)
     .digest("hex");
 
-  // timingSafeEqual exige mesmo tamanho
   try {
-    return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmac));
+    return timingSafeEqual(
+      Buffer.from(computed, "utf8"),
+      Buffer.from(hmac, "utf8")
+    );
   } catch {
     return false;
   }
 }
 
-export function buildInstallUrl(shop: string, state: string) {
-  const redirectUri = `${env.BASE_URL}/shopify/callback`;
-  const scopes = env.SHOPIFY_SCOPES;
+export async function exchangeCodeForTokenWithOptions(opts: {
+  shop: string;
+  code: string;
+}): Promise<{ access_token: string; scope?: string }> {
+  const shop = normalizeShopDomain(opts.shop);
+  const url = `https://${shop}/admin/oauth/access_token`;
 
-  const url = new URL(`https://${shop}/admin/oauth/authorize`);
-  url.searchParams.set("client_id", env.SHOPIFY_CLIENT_ID);
-  url.searchParams.set("scope", scopes);
-  url.searchParams.set("redirect_uri", redirectUri);
-  url.searchParams.set("state", state);
-  return url.toString();
-}
-
-export async function exchangeCodeForToken(params: { shop: string; code: string }) {
-  const url = new URL(`https://${params.shop}/admin/oauth/access_token`);
-
-  const res = await fetch(url.toString(), {
+  const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       client_id: env.SHOPIFY_CLIENT_ID,
       client_secret: env.SHOPIFY_CLIENT_SECRET,
-      code: params.code,
+      code: opts.code,
     }),
   });
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Shopify token exchange failed: ${res.status} ${text}`);
+    throw new Error(`Shopify token exchange failed (${res.status}): ${text}`);
   }
 
-  const data = (await res.json()) as { access_token: string; scope?: string };
-  return {
-    accessToken: data.access_token,
-    scope: data.scope ?? null,
-  };
+  return (await res.json()) as { access_token: string; scope?: string };
+}
+
+/* ------------------------------------------------------------------ */
+/* Backwards-compatible exports (pra não quebrar seus routes atuais)   */
+/* ------------------------------------------------------------------ */
+
+export function isValidShop(shop: string): boolean {
+  const normalized = normalizeShopDomain(shop);
+  return normalized.length > 0 && normalized.endsWith(".myshopify.com");
+}
+
+export function randomState(): string {
+  return generateOauthState();
+}
+
+export function verifyHmac(query: Record<string, unknown>): boolean {
+  return validateOauthHmac(query);
+}
+
+/**
+ * Compatível com routes antigos: buildInstallUrl(shop, state)
+ * Usa BASE_URL + /shopify/callback como redirect.
+ */
+export function buildInstallUrl(shop: string, state: string): string {
+  const redirectUri = `${env.BASE_URL}/shopify/callback`;
+  return buildInstallUrlWithOptions({ shop, state, redirectUri });
+}
+
+/**
+ * Compatível com routes antigos: exchangeCodeForToken(shop, code) => accessToken string
+ */
+export async function exchangeCodeForToken(
+  shop: string,
+  code: string
+): Promise<string> {
+  const { access_token } = await exchangeCodeForTokenWithOptions({ shop, code });
+  return access_token;
 }

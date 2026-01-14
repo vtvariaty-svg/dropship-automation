@@ -1,38 +1,27 @@
-import type { FastifyInstance } from "fastify";
-import crypto from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
+import { FastifyPluginAsync } from "fastify";
 import { env } from "../env";
 import { insertWebhookEvent } from "../integrations/shopify/webhookStore";
 
-function timingSafeEqual(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ab.length !== bb.length) return false;
-  return crypto.timingSafeEqual(ab, bb);
-}
-
-function verifyShopifyHmac(params: {
-  rawBody: Buffer;
-  hmacHeader: string | undefined;
-  sharedSecret: string;
-}): boolean {
-  const header = params.hmacHeader;
-  if (!header) return false;
-  const digest = crypto
-    .createHmac("sha256", params.sharedSecret)
-    .update(params.rawBody)
+function verifyWebhookHmac(rawBody: Buffer, hmacHeader: string): boolean {
+  const computed = createHmac("sha256", env.SHOPIFY_CLIENT_SECRET)
+    .update(rawBody)
     .digest("base64");
-  return timingSafeEqual(digest, header);
+
+  try {
+    return timingSafeEqual(
+      Buffer.from(computed, "utf8"),
+      Buffer.from(hmacHeader, "utf8")
+    );
+  } catch {
+    return false;
+  }
 }
 
-/**
- * Webhook receiver (Shopify -> sua API)
- *
- * Shopify chama via POST. GET dá 404 (normal).
- */
-export async function shopifyWebhooksRoutes(app: FastifyInstance) {
-  // Parser somente nesse escopo: precisamos do body em Buffer p/ validar HMAC.
+export const shopifyWebhooksRoutes: FastifyPluginAsync = async (app) => {
+  // Parser pra manter RAW body como Buffer (necessário pro HMAC)
   app.addContentTypeParser(
-    "application/json",
+    ["application/json", "application/*+json"],
     { parseAs: "buffer" },
     (req, body, done) => {
       done(null, body);
@@ -41,51 +30,51 @@ export async function shopifyWebhooksRoutes(app: FastifyInstance) {
 
   app.post("/shopify/webhooks", async (req, reply) => {
     const rawBody = req.body as Buffer;
+    if (!Buffer.isBuffer(rawBody)) {
+      reply.code(400);
+      return { ok: false, error: "Expected raw body buffer" };
+    }
 
-    const shop = (req.headers["x-shopify-shop-domain"] as string | undefined) ?? null;
-    const topic = (req.headers["x-shopify-topic"] as string | undefined) ?? null;
-    const webhookId = (req.headers["x-shopify-webhook-id"] as string | undefined) ?? null;
-    const apiVersion = (req.headers["x-shopify-api-version"] as string | undefined) ?? null;
-    const hmac = req.headers["x-shopify-hmac-sha256"] as string | undefined;
+    const shop = (req.headers["x-shopify-shop-domain"] as string) ?? null;
+    const topic = (req.headers["x-shopify-topic"] as string) ?? null;
+    const webhookId = (req.headers["x-shopify-webhook-id"] as string) ?? null;
+    const hmac = (req.headers["x-shopify-hmac-sha256"] as string) ?? null;
+    const apiVersion =
+      ((req.headers["x-shopify-api-version"] as string) ?? null) || null;
 
-    if (!shop || !topic || !webhookId) {
-      return reply.code(400).send({
+    if (!shop || !topic || !webhookId || !hmac) {
+      reply.code(400);
+      return {
         ok: false,
-        error: "Missing required webhook headers (shop/topic/webhook-id)",
-      });
+        error: "Missing required webhook headers (shop/topic/webhook-id/hmac)",
+      };
     }
 
-    const isValid = verifyShopifyHmac({
-      rawBody,
-      hmacHeader: hmac,
-      sharedSecret: env.SHOPIFY_CLIENT_SECRET,
-    });
-
-    if (!isValid) {
-      // Não armazena payload inválido (pode ser ataque)
-      return reply.code(401).send({ ok: false, error: "Invalid webhook HMAC" });
+    if (!verifyWebhookHmac(rawBody, hmac)) {
+      reply.code(401);
+      return { ok: false, error: "Invalid webhook HMAC" };
     }
 
-    let payload: unknown = null;
+    const payloadText = rawBody.toString("utf8");
+    let payloadJson: unknown = {};
     try {
-      payload = JSON.parse(rawBody.toString("utf8"));
+      payloadJson = payloadText ? JSON.parse(payloadText) : {};
     } catch {
-      // Shopify envia JSON; se falhar, registra raw mesmo assim
-      payload = null;
+      payloadJson = { _raw: payloadText };
     }
 
     await insertWebhookEvent({
       webhookId,
       shop,
       topic,
-      payload,
-      headers: req.headers,
-      status: "received",
       apiVersion,
-      payloadRaw: rawBody.toString("utf8"),
+      payload: payloadJson,
+      payloadRaw: payloadText,
+      headers: req.headers as any,
+      status: "received",
     });
 
-    // Shopify espera 200 rápido.
-    return reply.code(200).send({ ok: true });
+    // Shopify exige 200 rápido
+    return { ok: true };
   });
-}
+};
