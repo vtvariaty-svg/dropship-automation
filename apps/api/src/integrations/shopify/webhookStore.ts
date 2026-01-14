@@ -1,4 +1,4 @@
-import { pool } from "../db/pool";
+import { pool } from "../../db/pool";
 
 type InsertWebhookParams = {
   webhookId: string;
@@ -47,7 +47,6 @@ export async function insertWebhookEventIfNew(params: InsertWebhookParams) {
     ]
   );
 
-  // rowCount pode ser null no tipo do pg
   const inserted = (res.rowCount ?? 0) > 0;
 
   return { inserted };
