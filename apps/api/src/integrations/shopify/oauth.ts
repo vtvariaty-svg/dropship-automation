@@ -98,8 +98,8 @@ export async function exchangeCodeForToken(shop: string, code: string): Promise<
 }
 
 /**
- * ✅ Use isso no /shopify/callback depois de persistir o token.
- * Evita top-level await e garante que "shop/accessToken" existem no escopo.
+ * ✅ Chame isso no /shopify/callback DEPOIS de persistir o token.
+ * Evita top-level await e garante que shop/accessToken existem.
  */
 export async function registerWebhooksForShop(shop: string, accessToken: string): Promise<void> {
   if (!isValidShop(shop)) {
@@ -109,7 +109,11 @@ export async function registerWebhooksForShop(shop: string, accessToken: string)
     throw new Error("Missing accessToken");
   }
 
-  const client = new ShopifyAdminClient({ shop, accessToken });
+  const client = new ShopifyAdminClient({
+    shop,
+    accessToken,
+  });
+
   await ensureWebhooks(client);
 }
 
