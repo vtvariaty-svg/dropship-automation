@@ -1,40 +1,40 @@
+// apps/api/src/integrations/shopify/store.ts
 import { pool } from "../../db/pool";
 
-/**
- * Persistência mínima para tokens de lojas Shopify.
- *
- * Tabela esperada (Postgres):
- *   shopify_oauth(
- *     shop text primary key,
- *     access_token text not null,
- *     scope text,
- *     installed_at timestamptz not null default now()
- *   )
- */
+export type ShopTokenRow = {
+  shop: string;
+  access_token: string;
+  scope: string | null;
+  installed_at: Date;
+};
 
-export async function saveShopToken(params: {
+export async function saveShopToken(args: {
   shop: string;
   accessToken: string;
-  scope?: string | null;
-}) {
-  const { shop, accessToken, scope } = params;
-  await pool.query(
-    `
-    insert into shopify_oauth (shop, access_token, scope)
-    values ($1, $2, $3)
+  scope: string | null;
+}): Promise<void> {
+  const sql = `
+    insert into shopify_shop_access_tokens (shop, access_token, scope, installed_at)
+    values ($1, $2, $3, now())
     on conflict (shop)
-    do update set access_token = excluded.access_token, scope = excluded.scope
-    `,
-    [shop, accessToken, scope ?? null]
-  );
+    do update set access_token = excluded.access_token,
+                 scope = excluded.scope,
+                 installed_at = now()
+  `;
+  await pool.query(sql, [args.shop, args.accessToken, args.scope]);
 }
 
-export async function getShopToken(shop: string) {
-  const res = await pool.query<{
-    shop: string;
-    access_token: string;
-    scope: string | null;
-  }>(`select shop, access_token, scope from shopify_oauth where shop = $1`, [shop]);
+export async function getShopToken(shop: string): Promise<ShopTokenRow | null> {
+  const sql = `
+    select shop, access_token, scope, installed_at
+    from shopify_shop_access_tokens
+    where shop = $1
+    limit 1
+  `;
+  const res = await pool.query(sql, [shop]);
+  return (res.rows?.[0] as ShopTokenRow) ?? null;
+}
 
-  return res.rows[0] ?? null;
+export async function deleteShopToken(shop: string): Promise<void> {
+  await pool.query(`delete from shopify_shop_access_tokens where shop = $1`, [shop]);
 }

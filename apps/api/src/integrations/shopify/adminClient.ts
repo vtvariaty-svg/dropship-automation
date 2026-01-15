@@ -1,86 +1,100 @@
-import { DEFAULT_API_VERSION, normalizeShop } from "./oauth";
+// apps/api/src/integrations/shopify/adminClient.ts
+import { env } from "../../env";
 
-export type ShopifyAdminClient = {
-  shop: string;
-  accessToken: string;
-  apiVersion: string;
-  graphql: <T = unknown>(query: string, variables?: Record<string, unknown>) => Promise<T>;
-  rest: {
-    request: <T = unknown>(params: {
-      method: "GET" | "POST" | "PUT" | "DELETE";
-      path: string; // ex: "shop" ou "products/123"
-      query?: Record<string, string | number | boolean>;
-      body?: unknown;
-    }) => Promise<T>;
-  };
-};
-
-export function createAdminClient(params: {
+export type ShopifyAdminClientInit = {
   shop: string;
   accessToken: string;
   apiVersion?: string;
-}): ShopifyAdminClient {
-  const shop = normalizeShop(params.shop);
-  const apiVersion = params.apiVersion || DEFAULT_API_VERSION;
-  const accessToken = params.accessToken;
+};
 
-  async function graphql<T = unknown>(query: string, variables?: Record<string, unknown>): Promise<T> {
-    const resp = await fetch(`https://${shop}/admin/api/${apiVersion}/graphql.json`, {
+export type ShopifyGraphQLResponse<T> = {
+  data?: T;
+  errors?: Array<{ message: string; extensions?: unknown }>;
+};
+
+export class ShopifyAdminClient {
+  public readonly shop: string;
+  public readonly accessToken: string;
+  public readonly apiVersion: string;
+
+  constructor(init: ShopifyAdminClientInit) {
+    this.shop = init.shop;
+    this.accessToken = init.accessToken;
+    this.apiVersion = init.apiVersion ?? env.SHOPIFY_API_VERSION ?? "2024-10";
+  }
+
+  private adminGraphQLEndpoint(): string {
+    return `https://${this.shop}/admin/api/${this.apiVersion}/graphql.json`;
+  }
+
+  private adminRestBase(): string {
+    return `https://${this.shop}/admin/api/${this.apiVersion}`;
+  }
+
+  async graphql<T = unknown>(
+    query: string,
+    variables?: Record<string, unknown>
+  ): Promise<ShopifyGraphQLResponse<T>> {
+    const res = await fetch(this.adminGraphQLEndpoint(), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Shopify-Access-Token": accessToken,
+        "X-Shopify-Access-Token": this.accessToken,
       },
-      body: JSON.stringify({ query, variables }),
+      body: JSON.stringify({ query, variables: variables ?? {} }),
     });
 
-    const json = (await resp.json().catch(() => null)) as any;
-
-    if (!resp.ok) {
-      throw new Error(`Shopify GraphQL error: ${resp.status} ${JSON.stringify(json)}`);
+    const text = await res.text();
+    let json: any = null;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      // se não for JSON, estoura como erro útil
+      throw new Error(
+        `Shopify GraphQL non-JSON response (${res.status}): ${text.slice(0, 300)}`
+      );
     }
 
-    if (json?.errors?.length) {
-      throw new Error(`Shopify GraphQL errors: ${JSON.stringify(json.errors)}`);
-    }
-
-    return json?.data as T;
+    return json as ShopifyGraphQLResponse<T>;
   }
 
-  async function restRequest<T = unknown>(req: {
-    method: "GET" | "POST" | "PUT" | "DELETE";
-    path: string;
-    query?: Record<string, string | number | boolean>;
-    body?: unknown;
-  }): Promise<T> {
-    const url = new URL(`https://${shop}/admin/api/${apiVersion}/${req.path}.json`);
-    if (req.query) {
-      for (const [k, v] of Object.entries(req.query)) url.searchParams.set(k, String(v));
-    }
+  // REST helper (pra evitar erro "rest does not exist")
+  async rest<T = unknown>(
+    method: "GET" | "POST" | "PUT" | "DELETE",
+    path: string,
+    body?: unknown
+  ): Promise<{ status: number; data: T; raw: string }> {
+    // path pode vir com ou sem /, com ou sem .json
+    const normalized =
+      path.startsWith("/") ? path : `/${path}`;
+    const finalPath = normalized.endsWith(".json")
+      ? normalized
+      : `${normalized}.json`;
 
-    const resp = await fetch(url.toString(), {
-      method: req.method,
+    const url = `${this.adminRestBase()}${finalPath}`;
+
+    const res = await fetch(url, {
+      method,
       headers: {
         "Content-Type": "application/json",
-        "X-Shopify-Access-Token": accessToken,
+        "X-Shopify-Access-Token": this.accessToken,
       },
-      body: req.body ? JSON.stringify(req.body) : undefined,
+      body: body === undefined ? undefined : JSON.stringify(body),
     });
 
-    const json = (await resp.json().catch(() => null)) as any;
-
-    if (!resp.ok) {
-      throw new Error(`Shopify REST error: ${resp.status} ${JSON.stringify(json)}`);
+    const raw = await res.text();
+    let data: any = null;
+    try {
+      data = raw ? JSON.parse(raw) : null;
+    } catch {
+      data = raw as any;
     }
 
-    return json as T;
+    return { status: res.status, data: data as T, raw };
   }
+}
 
-  return {
-    shop,
-    accessToken,
-    apiVersion,
-    graphql,
-    rest: { request: restRequest },
-  };
+// compat: alguns lugares podem chamar createAdminClient()
+export function createAdminClient(init: ShopifyAdminClientInit): ShopifyAdminClient {
+  return new ShopifyAdminClient(init);
 }

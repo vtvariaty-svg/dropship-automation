@@ -1,82 +1,108 @@
+// apps/api/src/integrations/shopify/oauth.ts
 import crypto from "node:crypto";
+import { env } from "../../env";
+import { ShopifyAdminClient } from "./adminClient";
+import { saveShopToken } from "./store";
+import { ensureWebhooks } from "./webhookRegistrar";
 
-export const DEFAULT_API_VERSION = process.env.SHOPIFY_API_VERSION || "2024-10";
+export const SHOPIFY_STATE_COOKIE = "shopify_state";
 
+// Mantém um default estável, e também permite override via env.
+export const DEFAULT_API_VERSION = env.SHOPIFY_API_VERSION ?? "2024-10";
+
+/** remove https://, trailing slash, espaços, e força lowercase */
 export function normalizeShop(input: string): string {
-  const shop = String(input || "").trim().toLowerCase();
-
-  // Aceita apenas *.myshopify.com
-  if (!shop.endsWith(".myshopify.com")) {
-    throw new Error("Invalid shop domain. Expected *.myshopify.com");
-  }
-
-  // Bloqueia coisas estranhas
-  if (shop.includes("/") || shop.includes("?") || shop.includes("#")) {
-    throw new Error("Invalid shop domain format");
-  }
-
-  return shop;
+  const s = (input ?? "").trim().toLowerCase();
+  const noProto = s.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  return noProto;
 }
 
-export function randomState(bytes = 16): string {
-  return crypto.randomBytes(bytes).toString("hex");
+export function isValidShop(shop: string): boolean {
+  return /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i.test(shop);
 }
 
-export function buildInstallUrl(params: {
-  shop: string;
-  clientId: string;
-  scopes: string;
-  redirectUri: string;
-  state: string;
-}): string {
-  const shop = normalizeShop(params.shop);
+export function randomState(): string {
+  return crypto.randomBytes(16).toString("hex");
+}
 
-  const url = new URL(`https://${shop}/admin/oauth/authorize`);
-  url.searchParams.set("client_id", params.clientId);
-  url.searchParams.set("scope", params.scopes);
-  url.searchParams.set("redirect_uri", params.redirectUri);
-  url.searchParams.set("state", params.state);
-  url.searchParams.set("grant_options[]", "per-user"); // opcional, mas bom padrão
-
-  return url.toString();
+export function adminGraphQLEndpoint(shop: string): string {
+  const apiVersion = env.SHOPIFY_API_VERSION ?? DEFAULT_API_VERSION;
+  return `https://${shop}/admin/api/${apiVersion}/graphql.json`;
 }
 
 /**
- * Verifica HMAC do callback OAuth do Shopify.
- * Shopify calcula HMAC sobre query string (exceto hmac e signature).
+ * OAuth Install URL
+ * scopes: env.SHOPIFY_SCOPES (csv) ou string que você passar
  */
-export function verifyHmac(params: {
-  query: Record<string, unknown>;
-  clientSecret: string;
-}): boolean {
-  const { query, clientSecret } = params;
+export function buildInstallUrl(args: {
+  shop: string;
+  state: string;
+  redirectUri: string;
+  scopes?: string;
+  clientId?: string;
+}): string {
+  const shop = normalizeShop(args.shop);
+  const clientId = args.clientId ?? env.SHOPIFY_CLIENT_ID;
+  const scope = args.scopes ?? env.SHOPIFY_SCOPES;
 
-  const provided = String(query.hmac || "");
-  if (!provided) return false;
+  const u = new URL(`https://${shop}/admin/oauth/authorize`);
+  u.searchParams.set("client_id", clientId);
+  u.searchParams.set("scope", scope);
+  u.searchParams.set("redirect_uri", args.redirectUri);
+  u.searchParams.set("state", args.state);
 
-  const entries: [string, string][] = Object.entries(query)
-    .filter(([k, v]) => k !== "hmac" && k !== "signature" && v !== undefined && v !== null)
-    .map(([k, v]) => [k, Array.isArray(v) ? String(v[0]) : String(v)]);
+  // recomendado em alguns fluxos
+  u.searchParams.set("grant_options[]", "per-user");
 
-  entries.sort(([a], [b]) => a.localeCompare(b));
-
-  // Shopify usa & e = normal
-  const message = entries.map(([k, v]) => `${k}=${v}`).join("&");
-
-  const digest = crypto
-    .createHmac("sha256", clientSecret)
-    .update(message, "utf8")
-    .digest("hex");
-
-  return timingSafeEqualHex(digest, provided);
+  return u.toString();
 }
 
-function timingSafeEqualHex(a: string, b: string): boolean {
+/**
+ * Verifica HMAC do OAuth callback (querystring).
+ * Shopify envia `hmac` e o resto assina com secret.
+ */
+export function verifyHmac(query: Record<string, any>, secret: string): boolean {
+  const q = { ...query };
+
+  const hmac = String(q.hmac ?? "");
+  delete q.hmac;
+  delete q.signature; // legacy
+
+  const message = Object.keys(q)
+    .sort()
+    .map((k) => `${k}=${Array.isArray(q[k]) ? q[k].join(",") : String(q[k])}`)
+    .join("&");
+
+  const digest = crypto
+    .createHmac("sha256", secret)
+    .update(message)
+    .digest("hex");
+
+  // timing safe
   try {
-    const ab = Buffer.from(a, "hex");
-    const bb = Buffer.from(b, "hex");
-    if (ab.length !== bb.length) return false;
-    return crypto.timingSafeEqual(ab, bb);
+    return crypto.timingSafeEqual(
+      Buffer.from(digest, "utf8"),
+      Buffer.from(hmac, "utf8")
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Verifica HMAC de Webhook (base64) usando o RAW body (string exata).
+ */
+export function verifyWebhookHmac(rawBody: string, hmacHeader: string, secret: string): boolean {
+  const computed = crypto
+    .createHmac("sha256", secret)
+    .update(rawBody, "utf8")
+    .digest("base64");
+
+  try {
+    return crypto.timingSafeEqual(
+      Buffer.from(computed, "utf8"),
+      Buffer.from(String(hmacHeader ?? ""), "utf8")
+    );
   } catch {
     return false;
   }
@@ -85,59 +111,56 @@ function timingSafeEqualHex(a: string, b: string): boolean {
 /**
  * Troca code por access_token
  */
-export async function exchangeCodeForToken(params: {
+export async function exchangeCodeForToken(args: {
   shop: string;
-  clientId: string;
-  clientSecret: string;
   code: string;
-}): Promise<{ access_token: string; scope: string }> {
-  const shop = normalizeShop(params.shop);
+  clientId?: string;
+  clientSecret?: string;
+}): Promise<string> {
+  const shop = normalizeShop(args.shop);
+  const clientId = args.clientId ?? env.SHOPIFY_CLIENT_ID;
+  const clientSecret = args.clientSecret ?? env.SHOPIFY_CLIENT_SECRET;
 
-  const resp = await fetch(`https://${shop}/admin/oauth/access_token`, {
+  const res = await fetch(`https://${shop}/admin/oauth/access_token`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      client_id: params.clientId,
-      client_secret: params.clientSecret,
-      code: params.code,
+      client_id: clientId,
+      client_secret: clientSecret,
+      code: args.code,
     }),
   });
 
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => "");
-    throw new Error(`OAuth token exchange failed: ${resp.status} ${t}`);
+  const data = (await res.json()) as any;
+  if (!res.ok) {
+    throw new Error(`Shopify token exchange failed (${res.status}): ${JSON.stringify(data)}`);
   }
 
-  return (await resp.json()) as { access_token: string; scope: string };
+  if (!data?.access_token) {
+    throw new Error(`Shopify token exchange missing access_token: ${JSON.stringify(data)}`);
+  }
+
+  return String(data.access_token);
 }
 
 /**
- * Verifica HMAC do WEBHOOK (X-Shopify-Hmac-Sha256).
- * Shopify: base64(HMAC_SHA256(secret, rawBody))
+ * Fluxo final: salva token + registra webhooks
  */
-export function verifyWebhookHmac(params: {
-  rawBody: string;
-  hmacHeader: string;
-  clientSecret: string;
-}): boolean {
-  const provided = String(params.hmacHeader || "").trim();
-  if (!provided) return false;
+export async function finalizeInstall(args: {
+  shop: string;
+  accessToken: string;
+  scope?: string | null;
+}): Promise<void> {
+  await saveShopToken({
+    shop: args.shop,
+    accessToken: args.accessToken,
+    scope: args.scope ?? null,
+  });
 
-  const computed = crypto
-    .createHmac("sha256", params.clientSecret)
-    .update(params.rawBody, "utf8")
-    .digest("base64");
+  const client = new ShopifyAdminClient({
+    shop: args.shop,
+    accessToken: args.accessToken,
+  });
 
-  return timingSafeEqualBase64(computed, provided);
-}
-
-function timingSafeEqualBase64(a: string, b: string): boolean {
-  try {
-    const ab = Buffer.from(a, "base64");
-    const bb = Buffer.from(b, "base64");
-    if (ab.length !== bb.length) return false;
-    return crypto.timingSafeEqual(ab, bb);
-  } catch {
-    return false;
-  }
+  await ensureWebhooks(client);
 }

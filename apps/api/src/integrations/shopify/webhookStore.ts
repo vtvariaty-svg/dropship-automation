@@ -1,46 +1,70 @@
+// apps/api/src/integrations/shopify/webhookStore.ts
 import { pool } from "../../db/pool";
 
-export type InsertWebhookParams = {
+export type WebhookInsert = {
   webhookId: string;
   shop: string;
   topic: string;
+  payload: unknown;      // jsonb
+  headers: unknown;      // jsonb
   apiVersion: string | null;
-  payloadJson: unknown;
-  payloadRaw: string;
-  headersJson: Record<string, unknown>;
+  payloadRaw: string | null;
+  status: "ok" | "invalid_hmac" | "error";
 };
 
-export async function insertWebhookEventIfNew(params: InsertWebhookParams): Promise<{ inserted: boolean }> {
-  const {
-    webhookId,
-    shop,
-    topic,
-    apiVersion,
-    payloadJson,
-    payloadRaw,
-    headersJson,
-  } = params;
-
-  // Dedupe por (shop, webhook_id)
-  const res = await pool.query(
-    `
+export async function insertWebhookEvent(e: WebhookInsert): Promise<{ ok: true; id: number | null }> {
+  const sql = `
     insert into shopify_webhook_events
-      (webhook_id, shop, topic, api_version, payload, payload_raw, headers, received_at, status)
+      (webhook_id, shop, topic, payload, headers, received_at, status, api_version, payload_raw)
     values
-      ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, now(), 'received')
-    on conflict (shop, webhook_id) do nothing
-    `,
-    [
-      webhookId,
-      shop,
-      topic,
-      apiVersion,
-      JSON.stringify(payloadJson ?? null),
-      payloadRaw,
-      JSON.stringify(headersJson ?? {}),
-    ]
-  );
+      ($1, $2, $3, $4::jsonb, $5::jsonb, now(), $6, $7, $8)
+    returning id
+  `;
 
-  const inserted = (res.rowCount ?? 0) > 0;
-  return { inserted };
+  const res = await pool.query(sql, [
+    e.webhookId,
+    e.shop,
+    e.topic,
+    JSON.stringify(e.payload ?? {}),
+    JSON.stringify(e.headers ?? {}),
+    e.status,
+    e.apiVersion,
+    e.payloadRaw,
+  ]);
+
+  const id = (res.rows?.[0]?.id ?? null) as number | null;
+  return { ok: true, id };
+}
+
+export async function listWebhookEvents(args: {
+  shop?: string;
+  topic?: string;
+  limit?: number;
+}): Promise<Array<{ id: number; shop: string; topic: string; received_at: string; status: string }>> {
+  const where: string[] = [];
+  const params: any[] = [];
+
+  if (args.shop) {
+    params.push(args.shop);
+    where.push(`shop = $${params.length}`);
+  }
+
+  if (args.topic) {
+    params.push(args.topic);
+    where.push(`topic = $${params.length}`);
+  }
+
+  const limit = Math.max(1, Math.min(args.limit ?? 20, 200));
+  params.push(limit);
+
+  const sql = `
+    select id, shop, topic, received_at, status
+    from shopify_webhook_events
+    ${where.length ? `where ${where.join(" and ")}` : ""}
+    order by received_at desc
+    limit $${params.length}
+  `;
+
+  const res = await pool.query(sql, params);
+  return (res.rows ?? []) as any[];
 }
