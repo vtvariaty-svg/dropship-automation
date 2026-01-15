@@ -1,34 +1,33 @@
 import Fastify from "fastify";
 import cookie from "@fastify/cookie";
-
 import { env } from "./env";
-
-import { shopContextPlugin } from "./plugins/shopContext";
 
 import { rootRoutes } from "./routes/root";
 import { shopifyRoutes } from "./routes/shopify";
 import { shopifyAdminRoutes } from "./routes/shopifyAdmin";
 import { shopifyWebhooksRoutes } from "./routes/shopifyWebhooks";
 
+import { shopContextPlugin } from "./plugins/shopContext";
+
 async function bootstrap() {
   const app = Fastify({ logger: true });
 
+  // Plugins base
   await app.register(cookie);
 
-  // Context loader (shop + token via DB, quando aplicável)
+  // Plugin que carrega contexto (shop/token) por query/header
   await app.register(shopContextPlugin);
 
-  // rotas básicas
+  // Rotas base
   await app.register(rootRoutes);
 
-  // OAuth install/callback
+  // Shopify (OAuth, Admin, Webhooks)
   await app.register(shopifyRoutes);
-
-  // Admin API (REST/GraphQL) endpoints
   await app.register(shopifyAdminRoutes);
-
-  // Webhooks receiver
   await app.register(shopifyWebhooksRoutes);
+
+  app.get("/health", async () => ({ ok: true }));
+  app.get("/status", async () => ({ status: "running" }));
 
   await app.listen({
     port: env.PORT,
@@ -38,4 +37,9 @@ async function bootstrap() {
   app.log.info(`API running on port ${env.PORT}`);
 }
 
-bootstrap();
+bootstrap().catch((err) => {
+  // garante log em crash de bootstrap
+  // eslint-disable-next-line no-console
+  console.error(err);
+  process.exit(1);
+});

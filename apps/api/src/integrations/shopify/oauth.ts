@@ -1,114 +1,161 @@
 import crypto from "node:crypto";
-import { env } from "../../env";
 
-/* =========================
-   CONSTANTES
-========================= */
-
-export const DEFAULT_API_VERSION = "2024-10";
-
-/* =========================
-   SHOP HELPERS
-========================= */
-
-export function normalizeShop(input: string): string {
-  return input
-    .trim()
-    .replace(/^https?:\/\//i, "")
-    .replace(/\/.*$/i, "")
-    .toLowerCase();
-}
-
+/**
+ * Valida domínio da shop (ex: xxx.myshopify.com)
+ */
 export function isValidShop(shop: string): boolean {
-  return /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i.test(shop);
+  if (!shop) return false;
+  const s = shop.trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(s);
 }
 
-export function randomState(): string {
-  return crypto.randomBytes(16).toString("hex");
+/**
+ * Gera state aleatório para OAuth
+ */
+export function randomState(bytes = 16): string {
+  return crypto.randomBytes(bytes).toString("hex");
 }
 
-/* =========================
-   URLS
-========================= */
-
-export function adminGraphQLEndpoint(
-  shop: string,
-  apiVersion: string = DEFAULT_API_VERSION
-) {
-  return `https://${normalizeShop(
-    shop
-  )}/admin/api/${apiVersion}/graphql.json`;
-}
-
+/**
+ * Constrói URL de instalação do app (OAuth start)
+ */
 export function buildInstallUrl(params: {
   shop: string;
-  state: string;
-  scopes: string;
+  clientId: string;
   redirectUri: string;
-}) {
-  const shop = normalizeShop(params.shop);
+  scopes: string;
+  state: string;
+}): string {
+  const { shop, clientId, redirectUri, scopes, state } = params;
 
-  const qs = new URLSearchParams({
-    client_id: env.SHOPIFY_CLIENT_ID,
-    scope: params.scopes,
-    redirect_uri: params.redirectUri,
-    state: params.state,
+  if (!isValidShop(shop)) throw new Error("Invalid shop domain");
+
+  const q = new URLSearchParams({
+    client_id: clientId,
+    scope: scopes,
+    redirect_uri: redirectUri,
+    state,
   });
 
-  return `https://${shop}/admin/oauth/authorize?${qs.toString()}`;
+  return `https://${shop}/admin/oauth/authorize?${q.toString()}`;
 }
 
-/* =========================
-   OAUTH TOKEN
-========================= */
+/**
+ * Verifica HMAC do callback do OAuth (querystring).
+ * Shopify: remove "hmac" e "signature", ordena e monta query
+ */
+export function verifyHmac(params: {
+  query: Record<string, unknown>;
+  secret: string;
+}): boolean {
+  const { query, secret } = params;
+  const q: Record<string, string> = {};
 
-export async function exchangeCodeForToken(params: {
-  shop: string;
-  code: string;
-}) {
-  const res = await fetch(
-    `https://${normalizeShop(params.shop)}/admin/oauth/access_token`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        client_id: env.SHOPIFY_CLIENT_ID,
-        client_secret: env.SHOPIFY_CLIENT_SECRET,
-        code: params.code,
-      }),
-    }
-  );
+  for (const [k, v] of Object.entries(query)) {
+    if (k === "hmac" || k === "signature") continue;
+    if (v === undefined || v === null) continue;
 
-  if (!res.ok) {
-    throw new Error(`OAuth token exchange failed: ${res.status}`);
+    // Fastify pode entregar string | string[]
+    if (Array.isArray(v)) q[k] = v.join(",");
+    else q[k] = String(v);
   }
 
-  return res.json() as Promise<{
-    access_token: string;
-    scope: string;
-  }>;
+  const message = Object.keys(q)
+    .sort()
+    .map((k) => `${k}=${q[k]}`)
+    .join("&");
+
+  const provided = String((query as any).hmac || "").trim();
+  if (!provided) return false;
+
+  const digest = crypto
+    .createHmac("sha256", secret)
+    .update(message, "utf8")
+    .digest("hex");
+
+  return timingSafeEqual(digest, provided);
 }
 
-/* =========================
-   HMAC
-========================= */
+/**
+ * Troca code -> access_token
+ */
+export async function exchangeCodeForToken(params: {
+  shop: string;
+  clientId: string;
+  clientSecret: string;
+  code: string;
+}): Promise<{ accessToken: string; scope: string }> {
+  const { shop, clientId, clientSecret, code } = params;
 
-export function verifyHmac(
-  rawBody: string,
-  hmacHeader: string,
-  secret: string
-): boolean {
+  if (!isValidShop(shop)) throw new Error("Invalid shop domain");
+
+  const url = `https://${shop}/admin/oauth/access_token`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      client_id: clientId,
+      client_secret: clientSecret,
+      code,
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`OAuth token exchange failed (${res.status}): ${text}`);
+  }
+
+  const data = (await res.json()) as any;
+
+  if (!data?.access_token) {
+    throw new Error("OAuth token exchange returned no access_token");
+  }
+
+  return {
+    accessToken: String(data.access_token),
+    scope: String(data.scope || ""),
+  };
+}
+
+/**
+ * Endpoint Admin GraphQL para uma shop (para client.ts usar)
+ * Shopify GraphQL Admin endpoint:
+ * https://{shop}/admin/api/{version}/graphql.json
+ */
+export function adminGraphQLEndpoint(shop: string, apiVersion = "2024-10"): string {
+  if (!isValidShop(shop)) throw new Error("Invalid shop domain");
+  return `https://${shop}/admin/api/${apiVersion}/graphql.json`;
+}
+
+/**
+ * Verifica HMAC de webhook (base64 SHA256) usando o RAW BODY
+ * header: X-Shopify-Hmac-Sha256
+ */
+export function verifyWebhookHmac(params: {
+  rawBody: string;
+  hmacHeader: string | undefined;
+  secret: string;
+}): boolean {
+  const { rawBody, hmacHeader, secret } = params;
+
+  const provided = (hmacHeader || "").trim();
+  if (!provided) return false;
+
   const digest = crypto
     .createHmac("sha256", secret)
     .update(rawBody, "utf8")
     .digest("base64");
 
-  return safeEqual(digest, hmacHeader);
+  return timingSafeEqual(digest, provided);
 }
 
-function safeEqual(a: string, b: string) {
-  const ba = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ba.length !== bb.length) return false;
-  return crypto.timingSafeEqual(ba, bb);
+/**
+ * timing-safe compare pra evitar leak
+ */
+function timingSafeEqual(a: string, b: string): boolean {
+  const aa = Buffer.from(a, "utf8");
+  const bb = Buffer.from(b, "utf8");
+  if (aa.length !== bb.length) return false;
+  return crypto.timingSafeEqual(aa, bb);
 }
