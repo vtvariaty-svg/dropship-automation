@@ -1,44 +1,46 @@
 import Fastify from "fastify";
-import cookie from "@fastify/cookie";
-import { env } from "./env";
 
 import { rootRoutes } from "./routes/root";
 import { shopifyRoutes } from "./routes/shopify";
-import { shopifyAdminRoutes } from "./routes/shopifyAdmin";
 import { shopifyWebhooksRoutes } from "./routes/shopifyWebhooks";
+import { shopifyAdminRoutes } from "./routes/shopifyAdmin";
 
-import { shopContextPlugin } from "./plugins/shopContext";
+import { shopContextPlugin } from "./plugins/shopContextPlugin";
+
+// Se você tiver um plugin que adiciona request.rawBody, mantenha.
+// Caso não exista no teu projeto, remova esta linha e use o parser buffer no route do webhook (já está feito lá).
+// import { rawBodyPlugin } from "./plugins/rawBodyPlugin";
 
 async function bootstrap() {
   const app = Fastify({ logger: true });
 
   // Plugins base
-  await app.register(cookie);
-
-  // Plugin que carrega contexto (shop/token) por query/header
+  // await app.register(rawBodyPlugin);
   await app.register(shopContextPlugin);
 
   // Rotas base
   await app.register(rootRoutes);
 
-  // Shopify (OAuth, Admin, Webhooks)
-  await app.register(shopifyRoutes);
-  await app.register(shopifyAdminRoutes);
+  /**
+   * IMPORTANTE:
+   * Webhooks devem ser registrados antes de rotas que parseiam JSON,
+   * para garantir que o corpo bruto (raw) seja preservado.
+   */
   await app.register(shopifyWebhooksRoutes);
 
-  app.get("/health", async () => ({ ok: true }));
-  app.get("/status", async () => ({ status: "running" }));
+  // OAuth / Shopify (install/callback)
+  await app.register(shopifyRoutes);
 
-  await app.listen({
-    port: env.PORT,
-    host: "0.0.0.0",
-  });
+  // Admin endpoints (GraphQL)
+  await app.register(shopifyAdminRoutes);
 
-  app.log.info(`API running on port ${env.PORT}`);
+  const port = Number(process.env.PORT || 3000);
+  const host = "0.0.0.0";
+
+  await app.listen({ port, host });
 }
 
 bootstrap().catch((err) => {
-  // garante log em crash de bootstrap
   // eslint-disable-next-line no-console
   console.error(err);
   process.exit(1);

@@ -1,40 +1,53 @@
-import { FastifyInstance } from "fastify";
-import { env } from "../env";
-import { normalizeShop, verifyWebhookHmac } from "../integrations/shopify/oauth";
+import { FastifyPluginAsync } from "fastify";
+import { verifyWebhookHmac } from "../integrations/shopify/oauth";
 import { insertWebhookEventIfNew } from "../integrations/shopify/webhookStore";
 
-export async function shopifyWebhooksRoutes(app: FastifyInstance) {
-  // IMPORTANTÍSSIMO: pegar RAW body
+export const shopifyWebhooksRoutes: FastifyPluginAsync = async (app) => {
+  // Parser como BUFFER para preservar raw body (não pode perder um byte).
   app.addContentTypeParser(
     "application/json",
-    { parseAs: "string" },
-    (req, body, done) => done(null, body)
+    { parseAs: "buffer" },
+    async (_req, body) => body
   );
 
-  app.post("/shopify/webhooks", async (req, reply) => {
-    const headers = req.headers as Record<string, any>;
-
-    const shop = normalizeShop(headers["x-shopify-shop-domain"] ?? "");
-    const topic = String(headers["x-shopify-topic"] ?? "");
-    const webhookId = String(headers["x-shopify-webhook-id"] ?? "");
-    const hmac = String(headers["x-shopify-hmac-sha256"] ?? "");
-    const apiVersion = headers["x-shopify-api-version"] ? String(headers["x-shopify-api-version"]) : null;
-
-    const rawBody = typeof req.body === "string" ? req.body : "";
-
-    if (!shop || !topic || !webhookId) {
-      return reply.code(400).send({
-        ok: false,
-        error: "Missing required webhook headers (shop/topic/webhook-id)",
-      });
+  app.post("/shopify/webhooks", async (request, reply) => {
+    const secret = process.env.SHOPIFY_CLIENT_SECRET;
+    if (!secret) {
+      return reply.code(500).send({ ok: false, error: "Missing SHOPIFY_CLIENT_SECRET" });
     }
 
-    const okHmac = verifyWebhookHmac(rawBody, hmac, env.SHOPIFY_CLIENT_SECRET);
-    if (!okHmac) {
+    const headers = request.headers;
+
+    const shop = String(headers["x-shopify-shop-domain"] || "");
+    const topic = String(headers["x-shopify-topic"] || "");
+    const webhookId = String(headers["x-shopify-webhook-id"] || "");
+    const apiVersion = String(headers["x-shopify-api-version"] || "") || null;
+
+    const hmacHeader = String(headers["x-shopify-hmac-sha256"] || "");
+
+    const bodyBuf = request.body as Buffer;
+    const rawBody = Buffer.isBuffer(bodyBuf) ? bodyBuf.toString("utf8") : "";
+
+    if (!shop || !topic || !webhookId) {
+      return reply.code(400).send({ ok: false, error: "Missing required webhook headers (shop/topic/webhook-id)" });
+    }
+
+    const valid = verifyWebhookHmac({
+      rawBody,
+      hmacHeader,
+      clientSecret: secret,
+    });
+
+    if (!valid) {
       return reply.code(401).send({ ok: false, error: "Invalid webhook HMAC" });
     }
 
-    const payloadJson = rawBody ? safeJsonParse(rawBody) : null;
+    let payloadJson: unknown = null;
+    try {
+      payloadJson = rawBody ? JSON.parse(rawBody) : null;
+    } catch {
+      payloadJson = null;
+    }
 
     const insertedRes = await insertWebhookEventIfNew({
       webhookId,
@@ -43,7 +56,7 @@ export async function shopifyWebhooksRoutes(app: FastifyInstance) {
       apiVersion,
       payloadJson,
       payloadRaw: rawBody,
-      headersJson: headers,
+      headersJson: Object.fromEntries(Object.entries(headers).map(([k, v]) => [k, v])),
     });
 
     return reply.send({
@@ -54,12 +67,4 @@ export async function shopifyWebhooksRoutes(app: FastifyInstance) {
       webhookId,
     });
   });
-}
-
-function safeJsonParse(raw: string) {
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return { _raw: raw };
-  }
-}
+};

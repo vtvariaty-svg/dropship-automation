@@ -1,63 +1,69 @@
-import type { FastifyInstance } from "fastify";
-import { env } from "../env";
-import {
-  buildInstallUrl,
-  exchangeCodeForToken,
-  isValidShop,
-  randomState,
-  verifyHmac,
-} from "../integrations/shopify/oauth";
-import { saveShopToken } from "../integrations/shopify/store";
-import { ensureCoreWebhooks } from "../integrations/shopify/webhookRegistrar";
+import { FastifyPluginAsync } from "fastify";
+import { buildInstallUrl, exchangeCodeForToken, normalizeShop, randomState, verifyHmac } from "../integrations/shopify/oauth";
 
-export async function shopifyRoutes(app: FastifyInstance) {
-  app.get("/shopify/install", async (req, reply) => {
-    const shop = String((req.query as any)?.shop ?? "").trim();
-    if (!isValidShop(shop)) {
-      return reply.code(400).send({ ok: false, error: "Invalid shop" });
+// Ajuste para o teu store real:
+import { saveShopToken } from "../integrations/shopify/store";
+
+export const shopifyRoutes: FastifyPluginAsync = async (app) => {
+  app.get("/shopify/install", async (request, reply) => {
+    const clientId = process.env.SHOPIFY_CLIENT_ID;
+    const scopes = process.env.SHOPIFY_SCOPES;
+    const appUrl = process.env.APP_URL;
+
+    if (!clientId || !scopes || !appUrl) {
+      return reply.code(500).send({ ok: false, error: "Missing SHOPIFY_CLIENT_ID / SHOPIFY_SCOPES / APP_URL" });
     }
 
-    const state = randomState();
-    reply.setCookie("shopify_state", state, {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: env.NODE_ENV === "production",
-      path: "/",
-      maxAge: 600,
+    const shopParam = String((request.query as any)?.shop || "");
+    const shop = normalizeShop(shopParam);
+
+    const state = randomState(16);
+    // Se você tiver sessão/cookie, salve o state pra validar depois.
+    // Aqui mantive simples.
+
+    const redirectUri = `${appUrl}/shopify/callback`;
+
+    const url = buildInstallUrl({
+      shop,
+      clientId,
+      scopes,
+      redirectUri,
+      state,
     });
 
-    const redirectUrl = buildInstallUrl(shop, state);
-    return reply.redirect(302, redirectUrl);
+    return reply.redirect(url);
   });
 
-  app.get("/shopify/callback", async (req, reply) => {
-    const q = req.query as Record<string, any>;
-    const shop = String(q.shop ?? "");
-    const code = String(q.code ?? "");
-    const state = String(q.state ?? "");
+  app.get("/shopify/callback", async (request, reply) => {
+    const clientId = process.env.SHOPIFY_CLIENT_ID;
+    const clientSecret = process.env.SHOPIFY_CLIENT_SECRET;
 
-    if (!isValidShop(shop) || !code) {
-      return reply.code(400).send({ ok: false, error: "Invalid callback params" });
+    if (!clientId || !clientSecret) {
+      return reply.code(500).send({ ok: false, error: "Missing SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET" });
     }
 
-    const cookieState = (req.cookies as any)?.shopify_state;
-    if (!cookieState || cookieState !== state) {
-      return reply.code(401).send({ ok: false, error: "Invalid state" });
-    }
+    const query = request.query as any;
+    const shop = normalizeShop(String(query.shop || ""));
+    const code = String(query.code || "");
 
-    if (!verifyHmac(q)) {
-      return reply.code(401).send({ ok: false, error: "Invalid HMAC" });
-    }
+    if (!code) return reply.code(400).send({ ok: false, error: "Missing code" });
 
-    const { accessToken, scope } = await exchangeCodeForToken({ shop, code });
+    const ok = verifyHmac({ query, clientSecret });
+    if (!ok) return reply.code(401).send({ ok: false, error: "Invalid OAuth HMAC" });
 
-    await saveShopToken({ shop, accessToken, scope });
+    const token = await exchangeCodeForToken({
+      shop,
+      clientId,
+      clientSecret,
+      code,
+    });
 
-    // Registra webhooks essenciais (opção 1: REST) imediatamente após OAuth.
-    await ensureCoreWebhooks({ shop, accessToken });
-
-    reply.clearCookie("shopify_state", { path: "/" });
+    await saveShopToken({
+      shop,
+      accessToken: token.access_token,
+      scope: token.scope,
+    });
 
     return reply.send({ ok: true, shop });
   });
-}
+};
