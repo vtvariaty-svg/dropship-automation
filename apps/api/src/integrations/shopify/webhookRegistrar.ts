@@ -1,54 +1,40 @@
 import { ShopifyAdminClient } from "./adminClient";
 
-export type WebhookToRegister = {
-  topic: string; // ex: "app/uninstalled"
-  callbackUrl: string;
-};
-
-export async function registerWebhooks(client: ShopifyAdminClient, webhooks: WebhookToRegister[]) {
-  // Admin GraphQL mutation oficial: webhookSubscriptionCreate
+export async function ensureCoreWebhooks(params: {
+  client: ShopifyAdminClient;
+  callbackBaseUrl: string;
+}) {
   const mutation = `
-    mutation webhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $callbackUrl: URL!) {
-      webhookSubscriptionCreate(topic: $topic, webhookSubscription: { callbackUrl: $callbackUrl, format: JSON }) {
-        webhookSubscription { id topic endpoint { __typename } }
+    mutation webhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $url: URL!) {
+      webhookSubscriptionCreate(
+        topic: $topic,
+        webhookSubscription: { callbackUrl: $url, format: JSON }
+      ) {
         userErrors { field message }
       }
     }
   `;
 
-  for (const w of webhooks) {
-    const variables = {
-      topic: topicToGraphQLEnum(w.topic),
-      callbackUrl: w.callbackUrl,
-    };
+  const topics = ["APP_UNINSTALLED"];
 
-    const data = await client.graphql<{
+  for (const topic of topics) {
+    const res = await params.client.graphql<{
       webhookSubscriptionCreate: {
-        webhookSubscription: { id: string; topic: string } | null;
-        userErrors: Array<{ field: string[] | null; message: string }>;
+        userErrors: { message: string }[];
       };
-    }>(mutation, variables);
+    }>(mutation, {
+      topic,
+      url: `${params.callbackBaseUrl}/shopify/webhooks`,
+    });
 
-    const errors = data.webhookSubscriptionCreate.userErrors;
-    if (errors.length) {
-      throw new Error(`Webhook register failed: ${JSON.stringify(errors)}`);
+    if (res.webhookSubscriptionCreate.userErrors.length) {
+      throw new Error(
+        `Webhook error: ${JSON.stringify(
+          res.webhookSubscriptionCreate.userErrors
+        )}`
+      );
     }
   }
 
   return { ok: true };
-}
-
-/**
- * Shopify GraphQL espera enum do tipo WebhookSubscriptionTopic
- * Ex: "APP_UNINSTALLED"
- */
-function topicToGraphQLEnum(topic: string) {
-  // você pode expandir conforme for adicionando
-  switch (topic) {
-    case "app/uninstalled":
-      return "APP_UNINSTALLED";
-    default:
-      // fallback simples: app/uninstalled -> APP_UNINSTALLED
-      return topic.toUpperCase().replace(/\//g, "_").replace(/\./g, "_");
-  }
 }

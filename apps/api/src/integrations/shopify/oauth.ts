@@ -1,9 +1,17 @@
 import crypto from "node:crypto";
+import { env } from "../../env";
+
+/* =========================
+   CONSTANTES
+========================= */
 
 export const DEFAULT_API_VERSION = "2024-10";
 
+/* =========================
+   SHOP HELPERS
+========================= */
+
 export function normalizeShop(input: string): string {
-  // aceita "https://x.myshopify.com" ou "x.myshopify.com"
   return input
     .trim()
     .replace(/^https?:\/\//i, "")
@@ -11,40 +19,90 @@ export function normalizeShop(input: string): string {
     .toLowerCase();
 }
 
-export function adminGraphQLEndpoint(shop: string, apiVersion: string = DEFAULT_API_VERSION) {
-  const s = normalizeShop(shop);
-  return `https://${s}/admin/api/${apiVersion}/graphql.json`;
+export function isValidShop(shop: string): boolean {
+  return /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i.test(shop);
 }
 
-export function adminRestBase(shop: string, apiVersion: string = DEFAULT_API_VERSION) {
-  const s = normalizeShop(shop);
-  return `https://${s}/admin/api/${apiVersion}`;
+export function randomState(): string {
+  return crypto.randomBytes(16).toString("hex");
 }
 
-/**
- * Verifica HMAC do OAuth (querystring) se você quiser endurecer o callback.
- * OBS: Shopify usa HMAC hex do querystring assinado (sem o parâmetro hmac).
- */
-export function verifyOAuthHmac(query: Record<string, any>, clientSecret: string): boolean {
-  const { hmac, ...rest } = query;
-  if (!hmac || typeof hmac !== "string") return false;
+/* =========================
+   URLS
+========================= */
 
-  const message = Object.keys(rest)
-    .sort()
-    .map((k) => `${k}=${Array.isArray(rest[k]) ? rest[k].join(",") : rest[k]}`)
-    .join("&");
-
-  const digest = crypto.createHmac("sha256", clientSecret).update(message).digest("hex");
-  return safeEqual(digest, hmac);
+export function adminGraphQLEndpoint(
+  shop: string,
+  apiVersion: string = DEFAULT_API_VERSION
+) {
+  return `https://${normalizeShop(
+    shop
+  )}/admin/api/${apiVersion}/graphql.json`;
 }
 
-/**
- * Verificação HMAC do WEBHOOK (base64 do body RAW).
- */
-export function verifyWebhookHmac(rawBody: string, hmacHeader: string, clientSecret: string): boolean {
-  if (!hmacHeader) return false;
+export function buildInstallUrl(params: {
+  shop: string;
+  state: string;
+  scopes: string;
+  redirectUri: string;
+}) {
+  const shop = normalizeShop(params.shop);
 
-  const digest = crypto.createHmac("sha256", clientSecret).update(rawBody, "utf8").digest("base64");
+  const qs = new URLSearchParams({
+    client_id: env.SHOPIFY_CLIENT_ID,
+    scope: params.scopes,
+    redirect_uri: params.redirectUri,
+    state: params.state,
+  });
+
+  return `https://${shop}/admin/oauth/authorize?${qs.toString()}`;
+}
+
+/* =========================
+   OAUTH TOKEN
+========================= */
+
+export async function exchangeCodeForToken(params: {
+  shop: string;
+  code: string;
+}) {
+  const res = await fetch(
+    `https://${normalizeShop(params.shop)}/admin/oauth/access_token`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: env.SHOPIFY_CLIENT_ID,
+        client_secret: env.SHOPIFY_CLIENT_SECRET,
+        code: params.code,
+      }),
+    }
+  );
+
+  if (!res.ok) {
+    throw new Error(`OAuth token exchange failed: ${res.status}`);
+  }
+
+  return res.json() as Promise<{
+    access_token: string;
+    scope: string;
+  }>;
+}
+
+/* =========================
+   HMAC
+========================= */
+
+export function verifyHmac(
+  rawBody: string,
+  hmacHeader: string,
+  secret: string
+): boolean {
+  const digest = crypto
+    .createHmac("sha256", secret)
+    .update(rawBody, "utf8")
+    .digest("base64");
+
   return safeEqual(digest, hmacHeader);
 }
 
