@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import { env } from "../../env";
 import { ShopifyAdminClient } from "./adminClient";
 import { saveShopToken } from "./store";
-import { ensureWebhooks } from "./webhookRegistrar";
+import { ensureCoreWebhooks } from "./webhookRegistrar";
 
 export const SHOPIFY_STATE_COOKIE = "shopify_state";
 
@@ -21,8 +21,9 @@ export function isValidShop(shop: string): boolean {
   return /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i.test(shop);
 }
 
-export function randomState(): string {
-  return crypto.randomBytes(16).toString("hex");
+/** state randômico para OAuth (hex) */
+export function randomState(bytes = 16): string {
+  return crypto.randomBytes(bytes).toString("hex");
 }
 
 export function adminGraphQLEndpoint(shop: string): string {
@@ -61,7 +62,15 @@ export function buildInstallUrl(args: {
  * Verifica HMAC do OAuth callback (querystring).
  * Shopify envia `hmac` e o resto assina com secret.
  */
-export function verifyHmac(query: Record<string, any>, secret: string): boolean {
+export function verifyHmac(query: Record<string, any>, secret: string): boolean;
+export function verifyHmac(args: { query: Record<string, any>; clientSecret: string }): boolean;
+export function verifyHmac(
+  a: Record<string, any> | { query: Record<string, any>; clientSecret: string },
+  b?: string
+): boolean {
+  const query = ("query" in a ? a.query : a) as Record<string, any>;
+  const secret = ("query" in a ? a.clientSecret : b) as string;
+
   const q = { ...query };
 
   const hmac = String(q.hmac ?? "");
@@ -73,17 +82,11 @@ export function verifyHmac(query: Record<string, any>, secret: string): boolean 
     .map((k) => `${k}=${Array.isArray(q[k]) ? q[k].join(",") : String(q[k])}`)
     .join("&");
 
-  const digest = crypto
-    .createHmac("sha256", secret)
-    .update(message)
-    .digest("hex");
+  const digest = crypto.createHmac("sha256", secret).update(message).digest("hex");
 
   // timing safe
   try {
-    return crypto.timingSafeEqual(
-      Buffer.from(digest, "utf8"),
-      Buffer.from(hmac, "utf8")
-    );
+    return crypto.timingSafeEqual(Buffer.from(digest, "utf8"), Buffer.from(hmac, "utf8"));
   } catch {
     return false;
   }
@@ -92,17 +95,21 @@ export function verifyHmac(query: Record<string, any>, secret: string): boolean 
 /**
  * Verifica HMAC de Webhook (base64) usando o RAW body (string exata).
  */
-export function verifyWebhookHmac(rawBody: string, hmacHeader: string, secret: string): boolean {
-  const computed = crypto
-    .createHmac("sha256", secret)
-    .update(rawBody, "utf8")
-    .digest("base64");
+export function verifyWebhookHmac(rawBody: string, hmacHeader: string, secret: string): boolean;
+export function verifyWebhookHmac(args: { rawBody: string; hmacHeader: string; secret: string }): boolean;
+export function verifyWebhookHmac(
+  a: string | { rawBody: string; hmacHeader: string; secret: string },
+  b?: string,
+  c?: string
+): boolean {
+  const rawBody = typeof a === "string" ? a : a.rawBody;
+  const hmacHeader = typeof a === "string" ? String(b ?? "") : String(a.hmacHeader ?? "");
+  const secret = typeof a === "string" ? String(c ?? "") : String(a.secret ?? "");
+
+  const computed = crypto.createHmac("sha256", secret).update(rawBody, "utf8").digest("base64");
 
   try {
-    return crypto.timingSafeEqual(
-      Buffer.from(computed, "utf8"),
-      Buffer.from(String(hmacHeader ?? ""), "utf8")
-    );
+    return crypto.timingSafeEqual(Buffer.from(computed, "utf8"), Buffer.from(hmacHeader, "utf8"));
   } catch {
     return false;
   }
@@ -116,7 +123,7 @@ export async function exchangeCodeForToken(args: {
   code: string;
   clientId?: string;
   clientSecret?: string;
-}): Promise<string> {
+}): Promise<{ access_token: string; scope: string | null }> {
   const shop = normalizeShop(args.shop);
   const clientId = args.clientId ?? env.SHOPIFY_CLIENT_ID;
   const clientSecret = args.clientSecret ?? env.SHOPIFY_CLIENT_SECRET;
@@ -140,7 +147,10 @@ export async function exchangeCodeForToken(args: {
     throw new Error(`Shopify token exchange missing access_token: ${JSON.stringify(data)}`);
   }
 
-  return String(data.access_token);
+  return {
+    access_token: String(data.access_token),
+    scope: data?.scope ? String(data.scope) : null,
+  };
 }
 
 /**
@@ -162,5 +172,5 @@ export async function finalizeInstall(args: {
     accessToken: args.accessToken,
   });
 
-  await ensureWebhooks(client);
+  await ensureCoreWebhooks({ client, callbackBaseUrl: env.BASE_URL });
 }

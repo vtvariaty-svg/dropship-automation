@@ -1,42 +1,46 @@
-import { FastifyPluginAsync } from "fastify";
+// apps/api/src/routes/shopifyAdmin.ts
+import type { FastifyPluginAsync } from "fastify";
 import { createAdminClient } from "../integrations/shopify/adminClient";
-
-type ShopContext = {
-  shop: string;
-  accessToken: string;
-};
-
-// Ajuste se teu plugin usa outro nome
-declare module "fastify" {
-  interface FastifyRequest {
-    shopContext?: ShopContext;
-  }
-}
+import { normalizeShop } from "../integrations/shopify/oauth";
+import { getShopToken } from "../integrations/shopify/store";
 
 export const shopifyAdminRoutes: FastifyPluginAsync = async (app) => {
-  app.get("/shopify/admin/whoami", async (request, reply) => {
-    const ctx = request.shopContext;
-    if (!ctx?.shop || !ctx?.accessToken) {
-      return reply.code(401).send({ ok: false, error: "Missing shop context" });
+  app.get("/shop", async (req, reply) => {
+    const q = (req.query as { shop?: string }) || {};
+    const shopRaw = (req.shopDomain as string | undefined) ?? q.shop;
+    if (!shopRaw) {
+      return reply.code(400).send({ error: "Missing shop" });
     }
 
-    const client = createAdminClient({
-      shop: ctx.shop,
-      accessToken: ctx.accessToken,
-    });
+    const shop = normalizeShop(shopRaw);
+    const tokenRow = await getShopToken(shop);
+    if (!tokenRow?.access_token) {
+      return reply.code(401).send({ error: "No access token for this shop" });
+    }
 
-    const data = await client.graphql<{
-      shop: { name: string; myshopifyDomain: string; primaryDomain: { url: string } | null };
-    }>(`
-      query WhoAmI {
+    const client = createAdminClient({ shop, accessToken: tokenRow.access_token });
+
+    const query = `
+      query ShopInfo {
         shop {
           name
           myshopifyDomain
           primaryDomain { url }
         }
       }
-    `);
+    `;
 
-    return reply.send({ ok: true, shop: data.shop });
+    const res = await client.graphql<{
+      shop: {
+        name: string;
+        myshopifyDomain: string;
+        primaryDomain: { url: string } | null;
+      };
+    }>(query);
+
+    const data = res.data;
+    if (!data) return reply.code(502).send({ error: "Shopify GraphQL response missing data" });
+
+    return reply.send({ shop: data.shop });
   });
 };

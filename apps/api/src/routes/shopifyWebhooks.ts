@@ -1,70 +1,51 @@
-import { FastifyPluginAsync } from "fastify";
+// apps/api/src/routes/shopifyWebhooks.ts
+import type { FastifyPluginAsync } from "fastify";
+import { insertWebhookEvent } from "../integrations/shopify/webhookStore";
 import { verifyWebhookHmac } from "../integrations/shopify/oauth";
-import { insertWebhookEventIfNew } from "../integrations/shopify/webhookStore";
+import { env } from "../env";
 
 export const shopifyWebhooksRoutes: FastifyPluginAsync = async (app) => {
-  // Parser como BUFFER para preservar raw body (não pode perder um byte).
+  // IMPORTANTE: para validar HMAC, precisamos do body RAW exatamente como veio.
+  // O Fastify permite isso com `addContentTypeParser`.
   app.addContentTypeParser(
     "application/json",
     { parseAs: "buffer" },
-    async (_req, body) => body
+    async (_req: unknown, body: Buffer) => body
   );
 
-  app.post("/shopify/webhooks", async (request, reply) => {
-    const secret = process.env.SHOPIFY_CLIENT_SECRET;
-    if (!secret) {
-      return reply.code(500).send({ ok: false, error: "Missing SHOPIFY_CLIENT_SECRET" });
-    }
+  app.post("/shopify/webhooks", async (req, reply) => {
+    const headers = req.headers as Record<string, string | undefined>;
+    const shop = headers["x-shopify-shop-domain"] || "";
+    const topic = headers["x-shopify-topic"] || "";
+    const webhookId = headers["x-shopify-webhook-id"] || "";
+    const hmacHeader = headers["x-shopify-hmac-sha256"] || "";
+    const apiVersion = headers["x-shopify-api-version"] || null;
 
-    const headers = request.headers;
+    // `req.body` aqui é Buffer (por causa do parser acima)
+    const rawBodyBuffer = req.body as Buffer;
+    const rawBody = rawBodyBuffer.toString("utf8");
 
-    const shop = String(headers["x-shopify-shop-domain"] || "");
-    const topic = String(headers["x-shopify-topic"] || "");
-    const webhookId = String(headers["x-shopify-webhook-id"] || "");
-    const apiVersion = String(headers["x-shopify-api-version"] || "") || null;
-
-    const hmacHeader = String(headers["x-shopify-hmac-sha256"] || "");
-
-    const bodyBuf = request.body as Buffer;
-    const rawBody = Buffer.isBuffer(bodyBuf) ? bodyBuf.toString("utf8") : "";
-
-    if (!shop || !topic || !webhookId) {
-      return reply.code(400).send({ ok: false, error: "Missing required webhook headers (shop/topic/webhook-id)" });
-    }
-
-    const valid = verifyWebhookHmac({
+    const ok = verifyWebhookHmac({
       rawBody,
       hmacHeader,
-      clientSecret: secret,
+      secret: env.SHOPIFY_CLIENT_SECRET,
     });
 
-    if (!valid) {
+    if (!ok) {
       return reply.code(401).send({ ok: false, error: "Invalid webhook HMAC" });
     }
 
-    let payloadJson: unknown = null;
-    try {
-      payloadJson = rawBody ? JSON.parse(rawBody) : null;
-    } catch {
-      payloadJson = null;
-    }
-
-    const insertedRes = await insertWebhookEventIfNew({
+    const inserted = await insertWebhookEvent({
       webhookId,
       shop,
       topic,
-      apiVersion,
-      payloadJson,
+      payload: JSON.parse(rawBody),
       payloadRaw: rawBody,
-      headersJson: Object.fromEntries(Object.entries(headers).map(([k, v]) => [k, v])),
+      headers,
+      apiVersion,
+      status: "ok",
     });
 
-    return reply.send({
-      ok: true,
-      inserted: insertedRes.inserted,
-      shop,
-      topic,
-      webhookId,
-    });
+    return reply.send({ ok: true, id: inserted.id });
   });
 };
