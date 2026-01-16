@@ -5,19 +5,22 @@ export type WebhookInsert = {
   webhookId: string;
   shop: string;
   topic: string;
-  payload: unknown;      // jsonb
-  headers: unknown;      // jsonb
+  payload: unknown; // jsonb
+  headers: unknown; // jsonb
   apiVersion: string | null;
   payloadRaw: string | null;
   status: "ok" | "invalid_hmac" | "error";
 };
 
-export async function insertWebhookEvent(e: WebhookInsert): Promise<{ ok: true; id: number | null }> {
+export async function insertWebhookEvent(
+  e: WebhookInsert
+): Promise<{ ok: true; id: number | null }> {
   const sql = `
     insert into shopify_webhook_events
       (webhook_id, shop, topic, payload, headers, received_at, status, api_version, payload_raw)
     values
       ($1, $2, $3, $4::jsonb, $5::jsonb, now(), $6, $7, $8)
+    on conflict (webhook_id) do nothing
     returning id
   `;
 
@@ -36,11 +39,26 @@ export async function insertWebhookEvent(e: WebhookInsert): Promise<{ ok: true; 
   return { ok: true, id };
 }
 
+export async function updateWebhookEventStatus(args: {
+  webhookId: string;
+  status: string;
+}): Promise<void> {
+  const sql = `
+    update shopify_webhook_events
+    set status = $2
+    where webhook_id = $1
+  `;
+
+  await pool.query(sql, [args.webhookId, args.status]);
+}
+
 export async function listWebhookEvents(args: {
   shop?: string;
   topic?: string;
   limit?: number;
-}): Promise<Array<{ id: number; shop: string; topic: string; received_at: string; status: string }>> {
+}): Promise<
+  Array<{ id: number; shop: string; topic: string; received_at: string; status: string }>
+> {
   const where: string[] = [];
   const params: any[] = [];
 

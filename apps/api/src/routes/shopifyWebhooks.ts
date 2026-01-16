@@ -1,8 +1,9 @@
 // apps/api/src/routes/shopifyWebhooks.ts
 import type { FastifyPluginAsync } from "fastify";
-import { insertWebhookEvent } from "../integrations/shopify/webhookStore";
+import { insertWebhookEvent, updateWebhookEventStatus } from "../integrations/shopify/webhookStore";
 import { verifyWebhookHmac } from "../integrations/shopify/oauth";
 import { env } from "../env";
+import { cleanupShopTokensOnUninstall } from "../integrations/shopify/store";
 
 export const shopifyWebhooksRoutes: FastifyPluginAsync = async (app) => {
   // IMPORTANTE: para validar HMAC, precisamos do body RAW exatamente como veio.
@@ -45,6 +46,30 @@ export const shopifyWebhooksRoutes: FastifyPluginAsync = async (app) => {
       apiVersion,
       status: "ok",
     });
+
+    // Idempotencia: se ja existe (webhook_id unico), insert retorna id null.
+    // Respondemos 200 rapido e nao reprocessamos.
+    if (inserted.id == null) {
+      return reply.send({ ok: true, id: null, duplicate: true });
+    }
+
+    // Passo #1: fluxo real de app/uninstalled
+    if (topic === "app/uninstalled") {
+      try {
+        await cleanupShopTokensOnUninstall(shop);
+        await updateWebhookEventStatus({
+          webhookId,
+          status: "uninstalled_cleanup_ok",
+        });
+      } catch (err) {
+        app.log.error({ err, shop, webhookId }, "uninstalled cleanup failed");
+        await updateWebhookEventStatus({
+          webhookId,
+          status: "uninstalled_cleanup_error",
+        });
+        // Mesmo com erro, respondemos 200 para evitar retry infinito.
+      }
+    }
 
     return reply.send({ ok: true, id: inserted.id });
   });
