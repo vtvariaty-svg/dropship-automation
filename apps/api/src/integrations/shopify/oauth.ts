@@ -6,119 +6,67 @@ import { saveShopToken } from "./store";
 import { ensureCoreWebhooks } from "./webhookRegistrar";
 
 export const SHOPIFY_STATE_COOKIE = "shopify_state";
-
-// Mantém um default estável, e também permite override via env.
 export const DEFAULT_API_VERSION = env.SHOPIFY_API_VERSION ?? "2024-10";
 
-/** remove https://, trailing slash, espaços, e força lowercase */
 export function normalizeShop(input: string): string {
   const s = (input ?? "").trim().toLowerCase();
   const noProto = s.replace(/^https?:\/\//, "").replace(/\/+$/, "");
   return noProto;
 }
 
-export function isValidShop(shop: string): boolean {
-  return /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i.test(shop);
-}
-
-/** state randômico para OAuth (hex) */
 export function randomState(bytes = 16): string {
   return crypto.randomBytes(bytes).toString("hex");
 }
 
-export function adminGraphQLEndpoint(shop: string): string {
-  const apiVersion = env.SHOPIFY_API_VERSION ?? DEFAULT_API_VERSION;
-  return `https://${shop}/admin/api/${apiVersion}/graphql.json`;
-}
-
-/**
- * OAuth Install URL
- * scopes: env.SHOPIFY_SCOPES (csv) ou string que você passar
- */
-export function buildInstallUrl(args: {
-  shop: string;
-  state: string;
-  redirectUri: string;
-  scopes?: string;
-  clientId?: string;
-}): string {
-  const shop = normalizeShop(args.shop);
-  const clientId = args.clientId ?? env.SHOPIFY_CLIENT_ID;
-  const scope = args.scopes ?? env.SHOPIFY_SCOPES;
-
-  const u = new URL(`https://${shop}/admin/oauth/authorize`);
-  u.searchParams.set("client_id", clientId);
-  u.searchParams.set("scope", scope);
-  u.searchParams.set("redirect_uri", args.redirectUri);
-  u.searchParams.set("state", args.state);
-
-  // recomendado em alguns fluxos
-  u.searchParams.set("grant_options[]", "per-user");
-
-  return u.toString();
-}
-
-/**
- * Verifica HMAC do OAuth callback (querystring).
- * Shopify envia `hmac` e o resto assina com secret.
- */
-export function verifyHmac(query: Record<string, any>, secret: string): boolean;
-export function verifyHmac(args: { query: Record<string, any>; clientSecret: string }): boolean;
-export function verifyHmac(
-  a: Record<string, any> | { query: Record<string, any>; clientSecret: string },
-  b?: string
-): boolean {
-  const query = ("query" in a ? a.query : a) as Record<string, any>;
-  const secret = ("query" in a ? a.clientSecret : b) as string;
-
-  const q = { ...query };
-
+export function verifyHmac(args: {
+  query: Record<string, any>;
+  clientSecret: string;
+}): boolean {
+  const q = { ...args.query };
   const hmac = String(q.hmac ?? "");
   delete q.hmac;
-  delete q.signature; // legacy
+  delete q.signature;
 
   const message = Object.keys(q)
     .sort()
     .map((k) => `${k}=${Array.isArray(q[k]) ? q[k].join(",") : String(q[k])}`)
     .join("&");
 
-  const digest = crypto.createHmac("sha256", secret).update(message).digest("hex");
+  const digest = crypto
+    .createHmac("sha256", args.clientSecret)
+    .update(message)
+    .digest("hex");
 
-  // timing safe
   try {
-    return crypto.timingSafeEqual(Buffer.from(digest, "utf8"), Buffer.from(hmac, "utf8"));
+    return crypto.timingSafeEqual(
+      Buffer.from(digest, "utf8"),
+      Buffer.from(hmac, "utf8")
+    );
   } catch {
     return false;
   }
 }
 
-/**
- * Verifica HMAC de Webhook (base64) usando o RAW body (string exata).
- */
-export function verifyWebhookHmac(rawBody: string, hmacHeader: string, secret: string): boolean;
-export function verifyWebhookHmac(args: { rawBody: string; hmacHeader: string; secret: string }): boolean;
-export function verifyWebhookHmac(
-  a: string | { rawBody: string; hmacHeader: string; secret: string },
-  b?: string,
-  c?: string
-): boolean {
-  const rawBody = typeof a === "string" ? a : a.rawBody;
-  const hmacHeader = typeof a === "string" ? String(b ?? "") : String(a.hmacHeader ?? "");
-  const secret = typeof a === "string" ? String(c ?? "") : String(a.secret ?? "");
-
-  const computed = crypto.createHmac("sha256", secret).update(rawBody, "utf8").digest("base64");
+export function verifyWebhookHmac(args: {
+  rawBody: string;
+  hmacHeader: string;
+  secret: string;
+}): boolean {
+  const computed = crypto
+    .createHmac("sha256", args.secret)
+    .update(args.rawBody, "utf8")
+    .digest("base64");
 
   try {
-    return crypto.timingSafeEqual(Buffer.from(computed, "utf8"), Buffer.from(hmacHeader, "utf8"));
+    return crypto.timingSafeEqual(
+      Buffer.from(computed, "utf8"),
+      Buffer.from(String(args.hmacHeader ?? ""), "utf8")
+    );
   } catch {
     return false;
   }
 }
 
-/**
- * Troca code por access_token
- * Shopify retorna `scope` (singular) => nós persistimos como `scopes` (plural) no Neon
- */
 export async function exchangeCodeForToken(args: {
   shop: string;
   code: string;
@@ -141,11 +89,9 @@ export async function exchangeCodeForToken(args: {
 
   const data = (await res.json()) as any;
   if (!res.ok) {
-    throw new Error(`Shopify token exchange failed (${res.status}): ${JSON.stringify(data)}`);
-  }
-
-  if (!data?.access_token) {
-    throw new Error(`Shopify token exchange missing access_token: ${JSON.stringify(data)}`);
+    throw new Error(
+      `Shopify token exchange failed (${res.status}): ${JSON.stringify(data)}`
+    );
   }
 
   return {
@@ -155,23 +101,67 @@ export async function exchangeCodeForToken(args: {
 }
 
 /**
- * Fluxo final: salva token + registra webhooks
+ * FINAL do install:
+ * - salva token
+ * - registra webhooks (APP_UNINSTALLED)
+ * - logs determinísticos no Render
  */
 export async function finalizeInstall(args: {
   shop: string;
   accessToken: string;
   scopes?: string | null;
 }): Promise<void> {
+  const shop = normalizeShop(args.shop);
+
+  // ✅ BASE_URL precisa ser público e https
+  const baseUrl = (env.BASE_URL ?? "").replace(/\/+$/, "");
+  if (!baseUrl || !baseUrl.startsWith("https://")) {
+    throw new Error(
+      `Invalid BASE_URL: "${env.BASE_URL}". It must be public https URL (e.g. https://your-service.onrender.com)`
+    );
+  }
+
+  console.log(
+    JSON.stringify({
+      msg: "finalizeInstall.start",
+      shop,
+      baseUrl,
+    })
+  );
+
   await saveShopToken({
-    shop: args.shop,
+    shop,
     accessToken: args.accessToken,
     scopes: args.scopes ?? null,
   });
 
+  console.log(
+    JSON.stringify({
+      msg: "finalizeInstall.tokenSaved",
+      shop,
+    })
+  );
+
   const client = new ShopifyAdminClient({
-    shop: args.shop,
+    shop,
     accessToken: args.accessToken,
   });
 
-  await ensureCoreWebhooks({ client, callbackBaseUrl: env.BASE_URL });
+  console.log(
+    JSON.stringify({
+      msg: "finalizeInstall.ensureCoreWebhooks.start",
+      shop,
+      callbackUrl: `${baseUrl}/shopify/webhooks`,
+    })
+  );
+
+  // 🔥 Se isso falhar, você VAI ver no Render Logs
+  await ensureCoreWebhooks({ client, callbackBaseUrl: baseUrl });
+
+  console.log(
+    JSON.stringify({
+      msg: "finalizeInstall.ensureCoreWebhooks.done",
+      shop,
+    })
+  );
 }
