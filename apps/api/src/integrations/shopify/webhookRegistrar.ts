@@ -20,18 +20,12 @@ type WebhooksQueryResponse = {
   };
 };
 
-/**
- * Registra webhooks essenciais do app.
- * - Idempotente
- * - Seguro para chamar em todo install
- */
 export async function ensureCoreWebhooks({
   client,
   callbackBaseUrl,
 }: EnsureWebhooksArgs): Promise<void> {
   const callbackUrl = `${callbackBaseUrl}/shopify/webhooks`;
 
-  // 1️⃣ Buscar webhooks existentes
   const response = await client.graphql<WebhooksQueryResponse>(`
     query {
       webhooks(first: 100) {
@@ -48,6 +42,11 @@ export async function ensureCoreWebhooks({
     }
   `);
 
+  // TS strict + produção: se não vier data, falha com mensagem clara.
+  if (!response || !("data" in response) || !response.data) {
+    throw new Error("Shopify GraphQL returned no data for webhooks query");
+  }
+
   const topics = new Set(
     response.data.webhooks.edges.map(
       (edge: WebhooksQueryResponse["webhooks"]["edges"][number]) =>
@@ -55,9 +54,13 @@ export async function ensureCoreWebhooks({
     )
   );
 
-  // 2️⃣ Garantir app/uninstalled
   if (!topics.has("APP_UNINSTALLED")) {
-    await client.graphql(`
+    const createRes = await client.graphql<{
+      webhookSubscriptionCreate: {
+        userErrors: { field: string[] | null; message: string }[];
+        webhookSubscription: { id: string } | null;
+      };
+    }>(`
       mutation {
         webhookSubscriptionCreate(
           topic: APP_UNINSTALLED
@@ -76,5 +79,16 @@ export async function ensureCoreWebhooks({
         }
       }
     `);
+
+    if (!createRes || !("data" in createRes) || !createRes.data) {
+      throw new Error("Shopify GraphQL returned no data for webhook create mutation");
+    }
+
+    const errs = createRes.data.webhookSubscriptionCreate.userErrors ?? [];
+    if (errs.length > 0) {
+      throw new Error(
+        `Shopify webhook create failed: ${errs.map((e) => e.message).join("; ")}`
+      );
+    }
   }
 }
