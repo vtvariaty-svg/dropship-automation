@@ -1,5 +1,5 @@
 // apps/api/src/routes/shopifyWebhooks.ts
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import { verifyWebhookHmac } from "../integrations/shopify/oauth";
 import {
   insertWebhookEvent,
@@ -12,7 +12,7 @@ export const shopifyWebhooksRoutes: FastifyPluginAsync = async (app) => {
   app.addContentTypeParser(
     "application/json",
     { parseAs: "buffer" },
-    async (_req, body) => body
+    async (_req: FastifyRequest, body: Buffer) => body
   );
 
   app.post("/shopify/webhooks", async (req, reply) => {
@@ -58,7 +58,6 @@ export const shopifyWebhooksRoutes: FastifyPluginAsync = async (app) => {
       status: "received",
     });
 
-    // Idempotência
     if (inserted.id === null) {
       return reply.code(200).send({ ok: true, duplicate: true });
     }

@@ -1,15 +1,23 @@
 // apps/api/src/integrations/shopify/webhookStore.ts
 import { pool } from "../../db/pool";
 
+export type WebhookStatus =
+  | "received"
+  | "ok"
+  | "invalid_hmac"
+  | "uninstalled_cleanup_ok"
+  | "uninstalled_cleanup_error"
+  | "error";
+
 export type WebhookInsert = {
   webhookId: string;
   shop: string;
   topic: string;
-  payload: unknown; // jsonb
-  headers: unknown; // jsonb
+  payload: unknown;
+  headers: unknown;
   apiVersion: string | null;
   payloadRaw: string | null;
-  status: "ok" | "invalid_hmac" | "error";
+  status: WebhookStatus;
 };
 
 export async function insertWebhookEvent(
@@ -35,54 +43,19 @@ export async function insertWebhookEvent(
     e.payloadRaw,
   ]);
 
-  const id = (res.rows?.[0]?.id ?? null) as number | null;
-  return { ok: true, id };
+  return { ok: true, id: res.rows?.[0]?.id ?? null };
 }
 
 export async function updateWebhookEventStatus(args: {
   webhookId: string;
-  status: string;
+  status: WebhookStatus;
 }): Promise<void> {
-  const sql = `
+  await pool.query(
+    `
     update shopify_webhook_events
     set status = $2
     where webhook_id = $1
-  `;
-
-  await pool.query(sql, [args.webhookId, args.status]);
-}
-
-export async function listWebhookEvents(args: {
-  shop?: string;
-  topic?: string;
-  limit?: number;
-}): Promise<
-  Array<{ id: number; shop: string; topic: string; received_at: string; status: string }>
-> {
-  const where: string[] = [];
-  const params: any[] = [];
-
-  if (args.shop) {
-    params.push(args.shop);
-    where.push(`shop = $${params.length}`);
-  }
-
-  if (args.topic) {
-    params.push(args.topic);
-    where.push(`topic = $${params.length}`);
-  }
-
-  const limit = Math.max(1, Math.min(args.limit ?? 20, 200));
-  params.push(limit);
-
-  const sql = `
-    select id, shop, topic, received_at, status
-    from shopify_webhook_events
-    ${where.length ? `where ${where.join(" and ")}` : ""}
-    order by received_at desc
-    limit $${params.length}
-  `;
-
-  const res = await pool.query(sql, params);
-  return (res.rows ?? []) as any[];
+  `,
+    [args.webhookId, args.status]
+  );
 }
