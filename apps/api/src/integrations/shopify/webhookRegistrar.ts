@@ -1,51 +1,74 @@
 // apps/api/src/integrations/shopify/webhookRegistrar.ts
 import { ShopifyAdminClient } from "./adminClient";
 
-/**
- * Registra os webhooks essenciais do app via Admin GraphQL.
- *
- * Atualmente:
- * - APP_UNINSTALLED: dispara quando o lojista desinstala o app.
- */
-export async function ensureCoreWebhooks(params: {
+type EnsureWebhooksArgs = {
   client: ShopifyAdminClient;
   callbackBaseUrl: string;
-}) {
-  const { client } = params;
-  const base = params.callbackBaseUrl.replace(/\/+$/g, "");
-  const callbackUrl = `${base}/shopify/webhooks`;
+};
 
-  const topics: string[] = ["APP_UNINSTALLED"];
+/**
+ * Registra webhooks essenciais do app.
+ * - Idempotente
+ * - Não duplica
+ * - Seguro para chamar em todo install
+ */
+export async function ensureCoreWebhooks({
+  client,
+  callbackBaseUrl,
+}: EnsureWebhooksArgs): Promise<void> {
+  const callbackUrl = `${callbackBaseUrl}/shopify/webhooks`;
 
-  const mutation = `
-    mutation webhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $callbackUrl: URL!) {
-      webhookSubscriptionCreate(
-        topic: $topic,
-        webhookSubscription: { callbackUrl: $callbackUrl, format: JSON }
-      ) {
-        webhookSubscription { id }
-        userErrors { field message }
+  // 1️⃣ Buscar webhooks existentes
+  const existing = await client.graphql<{
+    webhooks: {
+      edges: {
+        node: {
+          id: string;
+          topic: string;
+          endpoint: { __typename: string };
+        };
+      }[];
+    };
+  }>(`
+    query {
+      webhooks(first: 100) {
+        edges {
+          node {
+            id
+            topic
+            endpoint {
+              __typename
+            }
+          }
+        }
       }
     }
-  `;
+  `);
 
-  for (const topic of topics) {
-    const res = await client.graphql<{
-      webhookSubscriptionCreate: {
-        webhookSubscription: { id: string } | null;
-        userErrors: Array<{ field: string[] | null; message: string }>;
-      };
-    }>(mutation, { topic, callbackUrl });
+  const topics = new Set(
+    existing.webhooks.edges.map((e) => e.node.topic)
+  );
 
-    const data = res.data;
-    if (!data) throw new Error("Shopify GraphQL response missing data");
-    const created = data.webhookSubscriptionCreate;
-
-    if (created.userErrors?.length) {
-      const msg = created.userErrors.map((e) => e.message).join("; ");
-      throw new Error(`Webhook create failed for ${topic}: ${msg}`);
-    }
+  // 2️⃣ Garantir app/uninstalled
+  if (!topics.has("APP_UNINSTALLED")) {
+    await client.graphql(`
+      mutation {
+        webhookSubscriptionCreate(
+          topic: APP_UNINSTALLED
+          webhookSubscription: {
+            callbackUrl: "${callbackUrl}"
+            format: JSON
+          }
+        ) {
+          userErrors {
+            field
+            message
+          }
+          webhookSubscription {
+            id
+          }
+        }
+      }
+    `);
   }
-
-  return { ok: true, callbackUrl, topics };
 }
