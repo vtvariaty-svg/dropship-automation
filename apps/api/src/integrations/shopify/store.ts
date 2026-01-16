@@ -4,18 +4,18 @@ import { pool } from "../../db/pool";
 export async function saveShopToken(args: {
   shop: string;
   accessToken: string;
-  scope: string | null;
+  scopes: string | null;
 }): Promise<void> {
   const sql = `
-    insert into shopify_oauth (shop, access_token, scope, installed_at)
+    insert into shopify_oauth (shop, access_token, scopes, installed_at)
     values ($1, $2, $3, now())
     on conflict (shop)
     do update set
       access_token = excluded.access_token,
-      scope = excluded.scope,
+      scopes = excluded.scopes,
       installed_at = now()
   `;
-  await pool.query(sql, [args.shop, args.accessToken, args.scope]);
+  await pool.query(sql, [args.shop, args.accessToken, args.scopes]);
 }
 
 export async function getShopToken(shop: string): Promise<string | null> {
@@ -30,16 +30,16 @@ export async function getShopToken(shop: string): Promise<string | null> {
 }
 
 /**
- * Cleanup idempotente:
- * - Sempre tenta limpar o token em shopify_oauth.
- * - Rodar N vezes mantém estado correto (token NULL).
+ * Cleanup idempotente para app/uninstalled:
+ * - access_token -> NULL
+ * - scopes -> NULL
  */
 export async function cleanupShopOnUninstall(shop: string): Promise<void> {
   await pool.query(
     `
     update shopify_oauth
     set access_token = null,
-        scope = null
+        scopes = null
     where lower(shop) = lower($1)
   `,
     [shop]
