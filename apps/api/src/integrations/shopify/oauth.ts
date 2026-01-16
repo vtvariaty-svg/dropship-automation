@@ -1,14 +1,18 @@
 // apps/api/src/integrations/shopify/oauth.ts
 import crypto from "node:crypto";
+import fetch from "node-fetch";
 import { env } from "../../env";
 
 /* =========================
-   Helpers básicos
+   Utils
 ========================= */
 
 export function normalizeShop(input: string): string {
-  const s = (input ?? "").trim().toLowerCase();
-  return s.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  return input
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/+$/, "");
 }
 
 export function randomState(bytes = 16): string {
@@ -28,13 +32,49 @@ export function buildInstallUrl(args: {
 }): string {
   const shop = normalizeShop(args.shop);
 
-  const u = new URL(`https://${shop}/admin/oauth/authorize`);
-  u.searchParams.set("client_id", args.clientId);
-  u.searchParams.set("scope", args.scopes);
-  u.searchParams.set("redirect_uri", args.redirectUri);
-  u.searchParams.set("state", args.state);
+  const url = new URL(`https://${shop}/admin/oauth/authorize`);
+  url.searchParams.set("client_id", args.clientId);
+  url.searchParams.set("scope", args.scopes);
+  url.searchParams.set("redirect_uri", args.redirectUri);
+  url.searchParams.set("state", args.state);
 
-  return u.toString();
+  return url.toString();
+}
+
+/* =========================
+   OAuth Code → Token
+========================= */
+
+export async function exchangeCodeForToken(args: {
+  shop: string;
+  code: string;
+}): Promise<{ accessToken: string; scopes: string }> {
+  const shop = normalizeShop(args.shop);
+
+  const res = await fetch(`https://${shop}/admin/oauth/access_token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      client_id: env.SHOPIFY_API_KEY,
+      client_secret: env.SHOPIFY_API_SECRET,
+      code: args.code,
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Shopify token exchange failed: ${res.status} ${text}`);
+  }
+
+  const json = (await res.json()) as {
+    access_token: string;
+    scope: string;
+  };
+
+  return {
+    accessToken: json.access_token,
+    scopes: json.scope,
+  };
 }
 
 /* =========================
@@ -47,7 +87,7 @@ export function adminGraphQLEndpoint(shop: string): string {
 }
 
 /* =========================
-   HMAC OAuth callback
+   OAuth HMAC validation
 ========================= */
 
 export function verifyHmac(args: {
@@ -56,6 +96,7 @@ export function verifyHmac(args: {
 }): boolean {
   const q = { ...args.query };
   const hmac = String(q.hmac ?? "");
+
   delete q.hmac;
   delete q.signature;
 
@@ -80,7 +121,7 @@ export function verifyHmac(args: {
 }
 
 /* =========================
-   Webhook HMAC (raw body)
+   Webhook HMAC
 ========================= */
 
 export function verifyWebhookHmac(args: {
