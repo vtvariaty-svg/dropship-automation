@@ -30,14 +30,18 @@ export async function getShopToken(shop: string): Promise<string | null> {
 }
 
 /**
- * Cleanup idempotente para app/uninstalled
+ * Cleanup idempotente:
+ * - Sempre tenta limpar o token em shopify_oauth.
+ * - Rodar N vezes mantém estado correto (token NULL).
  */
 export async function cleanupShopOnUninstall(shop: string): Promise<void> {
-  const sql = `
+  await pool.query(
+    `
     update shopify_oauth
     set access_token = null,
         scope = null
     where lower(shop) = lower($1)
-  `;
-  await pool.query(sql, [shop]);
+  `,
+    [shop]
+  );
 }

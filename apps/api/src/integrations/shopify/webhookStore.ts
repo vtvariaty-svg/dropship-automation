@@ -59,3 +59,17 @@ export async function updateWebhookEventStatus(args: {
     [args.webhookId, args.status]
   );
 }
+
+export async function updateWebhookEventStatusById(args: {
+  id: number;
+  status: WebhookStatus;
+}): Promise<void> {
+  await pool.query(
+    `
+    update shopify_webhook_events
+    set status = $2
+    where id = $1
+  `,
+    [args.id, args.status]
+  );
+}
