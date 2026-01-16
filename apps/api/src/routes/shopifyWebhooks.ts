@@ -1,47 +1,105 @@
-// apps/api/src/integrations/shopify/store.ts
-import { pool } from "../../db/pool";
+// apps/api/src/routes/shopifyWebhooks.ts
+import type { FastifyPluginAsync, FastifyRequest } from "fastify";
+import { verifyWebhookHmac } from "../integrations/shopify/oauth";
+import {
+  insertWebhookEvent,
+  updateWebhookEventStatus,
+  updateWebhookEventStatusById,
+} from "../integrations/shopify/webhookStore";
+import { cleanupShopOnUninstall } from "../integrations/shopify/store";
+import { env } from "../env";
 
-export async function saveShopToken(args: {
-  shop: string;
-  accessToken: string;
-  scope: string | null;
-}): Promise<void> {
-  const sql = `
-    insert into shopify_oauth (shop, access_token, scope, installed_at)
-    values ($1, $2, $3, now())
-    on conflict (shop)
-    do update set
-      access_token = excluded.access_token,
-      scope = excluded.scope,
-      installed_at = now()
-  `;
-  await pool.query(sql, [args.shop, args.accessToken, args.scope]);
+function norm(v: string | undefined): string {
+  return (v ?? "").trim().toLowerCase();
 }
 
-export async function getShopToken(shop: string): Promise<string | null> {
-  const sql = `
-    select access_token
-    from shopify_oauth
-    where lower(shop) = lower($1)
-    limit 1
-  `;
-  const res = await pool.query(sql, [shop]);
-  return res.rows?.[0]?.access_token ?? null;
-}
-
-/**
- * Cleanup idempotente:
- * - Sempre tenta limpar o token em shopify_oauth.
- * - Rodar N vezes mantém estado correto (token NULL).
- */
-export async function cleanupShopOnUninstall(shop: string): Promise<void> {
-  await pool.query(
-    `
-    update shopify_oauth
-    set access_token = null,
-        scope = null
-    where lower(shop) = lower($1)
-  `,
-    [shop]
+export const shopifyWebhooksRoutes: FastifyPluginAsync = async (app) => {
+  app.addContentTypeParser(
+    "application/json",
+    { parseAs: "buffer" },
+    async (_req: FastifyRequest, body: Buffer) => body
   );
-}
+
+  app.post("/shopify/webhooks", async (req, reply) => {
+    const headers = req.headers as Record<string, string | undefined>;
+
+    const shop = headers["x-shopify-shop-domain"];
+    const topicRaw = headers["x-shopify-topic"];
+    const webhookId = headers["x-shopify-webhook-id"];
+    const hmacHeader = headers["x-shopify-hmac-sha256"];
+    const apiVersion = headers["x-shopify-api-version"] ?? null;
+
+    const rawBodyBuffer = req.body as Buffer;
+    const rawBody = rawBodyBuffer.toString("utf8");
+
+    if (!shop || !topicRaw || !hmacHeader || !webhookId) {
+      await insertWebhookEvent({
+        webhookId: webhookId ?? `missing-${Date.now()}`,
+        shop: shop ?? "unknown",
+        topic: topicRaw ?? "unknown",
+        payload: {},
+        payloadRaw: rawBody,
+        headers,
+        apiVersion,
+        status: "error",
+      });
+      return reply.code(200).send({ ok: true });
+    }
+
+    const valid = verifyWebhookHmac({
+      rawBody,
+      hmacHeader,
+      secret: env.SHOPIFY_CLIENT_SECRET,
+    });
+
+    if (!valid) {
+      await insertWebhookEvent({
+        webhookId,
+        shop,
+        topic: topicRaw,
+        payload: {},
+        payloadRaw: rawBody,
+        headers,
+        apiVersion,
+        status: "invalid_hmac",
+      });
+      return reply.code(401).send({ ok: false });
+    }
+
+    const inserted = await insertWebhookEvent({
+      webhookId,
+      shop,
+      topic: topicRaw,
+      payload: JSON.parse(rawBody),
+      payloadRaw: rawBody,
+      headers,
+      apiVersion,
+      status: "received",
+    });
+
+    if (inserted.id === null) {
+      return reply.code(200).send({ ok: true, duplicate: true });
+    }
+
+    if (norm(topicRaw) === "app/uninstalled") {
+      try {
+        await cleanupShopOnUninstall(shop);
+        await updateWebhookEventStatusById({
+          id: inserted.id,
+          status: "uninstalled_cleanup_ok",
+        });
+        await updateWebhookEventStatus({
+          webhookId,
+          status: "uninstalled_cleanup_ok",
+        });
+      } catch {
+        await updateWebhookEventStatusById({
+          id: inserted.id,
+          status: "uninstalled_cleanup_error",
+        });
+      }
+    }
+
+    return reply.code(200).send({ ok: true });
+  });
+};
