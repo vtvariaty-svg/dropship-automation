@@ -6,10 +6,23 @@ type EnsureWebhooksArgs = {
   callbackBaseUrl: string;
 };
 
+type WebhooksQueryResponse = {
+  webhooks: {
+    edges: {
+      node: {
+        id: string;
+        topic: string;
+        endpoint: {
+          __typename: string;
+        };
+      };
+    }[];
+  };
+};
+
 /**
  * Registra webhooks essenciais do app.
  * - Idempotente
- * - Não duplica
  * - Seguro para chamar em todo install
  */
 export async function ensureCoreWebhooks({
@@ -19,17 +32,7 @@ export async function ensureCoreWebhooks({
   const callbackUrl = `${callbackBaseUrl}/shopify/webhooks`;
 
   // 1️⃣ Buscar webhooks existentes
-  const existing = await client.graphql<{
-    webhooks: {
-      edges: {
-        node: {
-          id: string;
-          topic: string;
-          endpoint: { __typename: string };
-        };
-      }[];
-    };
-  }>(`
+  const response = await client.graphql<WebhooksQueryResponse>(`
     query {
       webhooks(first: 100) {
         edges {
@@ -46,7 +49,10 @@ export async function ensureCoreWebhooks({
   `);
 
   const topics = new Set(
-    existing.webhooks.edges.map((e) => e.node.topic)
+    response.data.webhooks.edges.map(
+      (edge: WebhooksQueryResponse["webhooks"]["edges"][number]) =>
+        edge.node.topic
+    )
   );
 
   // 2️⃣ Garantir app/uninstalled
