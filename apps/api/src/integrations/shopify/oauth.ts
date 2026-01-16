@@ -1,145 +1,176 @@
 // apps/api/src/integrations/shopify/oauth.ts
 import crypto from "node:crypto";
-import fetch from "node-fetch";
 import { env } from "../../env";
+import { ShopifyAdminClient } from "./adminClient";
+import { saveShopToken } from "./store";
+import { ensureCoreWebhooks } from "./webhookRegistrar";
 
-/* =========================
-   Utils
-========================= */
+export const SHOPIFY_STATE_COOKIE = "shopify_state";
 
+// Mantém um default estável, e também permite override via env.
+export const DEFAULT_API_VERSION = env.SHOPIFY_API_VERSION ?? "2024-10";
+
+/** remove https://, trailing slash, espaços, e força lowercase */
 export function normalizeShop(input: string): string {
-  return input
-    .trim()
-    .toLowerCase()
-    .replace(/^https?:\/\//, "")
-    .replace(/\/+$/, "");
+  const s = (input ?? "").trim().toLowerCase();
+  const noProto = s.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  return noProto;
 }
 
+export function isValidShop(shop: string): boolean {
+  return /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i.test(shop);
+}
+
+/** state randômico para OAuth (hex) */
 export function randomState(bytes = 16): string {
   return crypto.randomBytes(bytes).toString("hex");
 }
 
-/* =========================
-   OAuth URLs
-========================= */
+export function adminGraphQLEndpoint(shop: string): string {
+  const apiVersion = env.SHOPIFY_API_VERSION ?? DEFAULT_API_VERSION;
+  return `https://${shop}/admin/api/${apiVersion}/graphql.json`;
+}
 
+/**
+ * OAuth Install URL
+ * scopes: env.SHOPIFY_SCOPES (csv) ou string que você passar
+ */
 export function buildInstallUrl(args: {
   shop: string;
-  clientId: string;
-  scopes: string;
-  redirectUri: string;
   state: string;
+  redirectUri: string;
+  scopes?: string;
+  clientId?: string;
 }): string {
   const shop = normalizeShop(args.shop);
+  const clientId = args.clientId ?? env.SHOPIFY_CLIENT_ID;
+  const scope = args.scopes ?? env.SHOPIFY_SCOPES;
 
-  const url = new URL(`https://${shop}/admin/oauth/authorize`);
-  url.searchParams.set("client_id", args.clientId);
-  url.searchParams.set("scope", args.scopes);
-  url.searchParams.set("redirect_uri", args.redirectUri);
-  url.searchParams.set("state", args.state);
+  const u = new URL(`https://${shop}/admin/oauth/authorize`);
+  u.searchParams.set("client_id", clientId);
+  u.searchParams.set("scope", scope);
+  u.searchParams.set("redirect_uri", args.redirectUri);
+  u.searchParams.set("state", args.state);
 
-  return url.toString();
+  // recomendado em alguns fluxos
+  u.searchParams.set("grant_options[]", "per-user");
+
+  return u.toString();
 }
 
-/* =========================
-   OAuth Code → Token
-========================= */
+/**
+ * Verifica HMAC do OAuth callback (querystring).
+ * Shopify envia `hmac` e o resto assina com secret.
+ */
+export function verifyHmac(query: Record<string, any>, secret: string): boolean;
+export function verifyHmac(args: { query: Record<string, any>; clientSecret: string }): boolean;
+export function verifyHmac(
+  a: Record<string, any> | { query: Record<string, any>; clientSecret: string },
+  b?: string
+): boolean {
+  const query = ("query" in a ? a.query : a) as Record<string, any>;
+  const secret = ("query" in a ? a.clientSecret : b) as string;
 
-export async function exchangeCodeForToken(args: {
-  shop: string;
-  code: string;
-}): Promise<{ accessToken: string; scopes: string }> {
-  const shop = normalizeShop(args.shop);
+  const q = { ...query };
 
-  const res = await fetch(`https://${shop}/admin/oauth/access_token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      client_id: env.SHOPIFY_API_KEY,
-      client_secret: env.SHOPIFY_API_SECRET,
-      code: args.code,
-    }),
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Shopify token exchange failed: ${res.status} ${text}`);
-  }
-
-  const json = (await res.json()) as {
-    access_token: string;
-    scope: string;
-  };
-
-  return {
-    accessToken: json.access_token,
-    scopes: json.scope,
-  };
-}
-
-/* =========================
-   Admin GraphQL endpoint
-========================= */
-
-export function adminGraphQLEndpoint(shop: string): string {
-  const apiVersion = env.SHOPIFY_API_VERSION ?? "2024-10";
-  return `https://${normalizeShop(shop)}/admin/api/${apiVersion}/graphql.json`;
-}
-
-/* =========================
-   OAuth HMAC validation
-========================= */
-
-export function verifyHmac(args: {
-  query: Record<string, any>;
-  clientSecret: string;
-}): boolean {
-  const q = { ...args.query };
   const hmac = String(q.hmac ?? "");
-
   delete q.hmac;
-  delete q.signature;
+  delete q.signature; // legacy
 
   const message = Object.keys(q)
     .sort()
     .map((k) => `${k}=${Array.isArray(q[k]) ? q[k].join(",") : String(q[k])}`)
     .join("&");
 
-  const digest = crypto
-    .createHmac("sha256", args.clientSecret)
-    .update(message)
-    .digest("hex");
+  const digest = crypto.createHmac("sha256", secret).update(message).digest("hex");
 
+  // timing safe
   try {
-    return crypto.timingSafeEqual(
-      Buffer.from(digest, "utf8"),
-      Buffer.from(hmac, "utf8")
-    );
+    return crypto.timingSafeEqual(Buffer.from(digest, "utf8"), Buffer.from(hmac, "utf8"));
   } catch {
     return false;
   }
 }
 
-/* =========================
-   Webhook HMAC
-========================= */
+/**
+ * Verifica HMAC de Webhook (base64) usando o RAW body (string exata).
+ */
+export function verifyWebhookHmac(rawBody: string, hmacHeader: string, secret: string): boolean;
+export function verifyWebhookHmac(args: { rawBody: string; hmacHeader: string; secret: string }): boolean;
+export function verifyWebhookHmac(
+  a: string | { rawBody: string; hmacHeader: string; secret: string },
+  b?: string,
+  c?: string
+): boolean {
+  const rawBody = typeof a === "string" ? a : a.rawBody;
+  const hmacHeader = typeof a === "string" ? String(b ?? "") : String(a.hmacHeader ?? "");
+  const secret = typeof a === "string" ? String(c ?? "") : String(a.secret ?? "");
 
-export function verifyWebhookHmac(args: {
-  rawBody: string;
-  hmacHeader: string;
-  secret: string;
-}): boolean {
-  const computed = crypto
-    .createHmac("sha256", args.secret)
-    .update(args.rawBody, "utf8")
-    .digest("base64");
+  const computed = crypto.createHmac("sha256", secret).update(rawBody, "utf8").digest("base64");
 
   try {
-    return crypto.timingSafeEqual(
-      Buffer.from(computed, "utf8"),
-      Buffer.from(String(args.hmacHeader ?? ""), "utf8")
-    );
+    return crypto.timingSafeEqual(Buffer.from(computed, "utf8"), Buffer.from(hmacHeader, "utf8"));
   } catch {
     return false;
   }
+}
+
+/**
+ * Troca code por access_token
+ */
+export async function exchangeCodeForToken(args: {
+  shop: string;
+  code: string;
+  clientId?: string;
+  clientSecret?: string;
+}): Promise<{ access_token: string; scope: string | null }> {
+  const shop = normalizeShop(args.shop);
+  const clientId = args.clientId ?? env.SHOPIFY_CLIENT_ID;
+  const clientSecret = args.clientSecret ?? env.SHOPIFY_CLIENT_SECRET;
+
+  const res = await fetch(`https://${shop}/admin/oauth/access_token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      client_id: clientId,
+      client_secret: clientSecret,
+      code: args.code,
+    }),
+  });
+
+  const data = (await res.json()) as any;
+  if (!res.ok) {
+    throw new Error(`Shopify token exchange failed (${res.status}): ${JSON.stringify(data)}`);
+  }
+
+  if (!data?.access_token) {
+    throw new Error(`Shopify token exchange missing access_token: ${JSON.stringify(data)}`);
+  }
+
+  return {
+    access_token: String(data.access_token),
+    scope: data?.scope ? String(data.scope) : null,
+  };
+}
+
+/**
+ * Fluxo final: salva token + registra webhooks
+ */
+export async function finalizeInstall(args: {
+  shop: string;
+  accessToken: string;
+  scope?: string | null;
+}): Promise<void> {
+  await saveShopToken({
+    shop: args.shop,
+    accessToken: args.accessToken,
+    scope: args.scope ?? null,
+  });
+
+  const client = new ShopifyAdminClient({
+    shop: args.shop,
+    accessToken: args.accessToken,
+  });
+
+  await ensureCoreWebhooks({ client, callbackBaseUrl: env.BASE_URL });
 }
