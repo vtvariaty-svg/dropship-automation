@@ -6,8 +6,6 @@ import { saveShopToken } from "./store";
 import { ensureCoreWebhooks } from "./webhookRegistrar";
 
 export const SHOPIFY_STATE_COOKIE = "shopify_state";
-
-// Mantém um default estável, e também permite override via env.
 export const DEFAULT_API_VERSION = env.SHOPIFY_API_VERSION ?? "2024-10";
 
 /** remove https://, trailing slash, espaços, e força lowercase */
@@ -44,11 +42,11 @@ export function buildInstallUrl(args: {
 }): string {
   const shop = normalizeShop(args.shop);
   const clientId = args.clientId ?? env.SHOPIFY_CLIENT_ID;
-  const scope = args.scopes ?? env.SHOPIFY_SCOPES;
+  const scopes = args.scopes ?? env.SHOPIFY_SCOPES;
 
   const u = new URL(`https://${shop}/admin/oauth/authorize`);
   u.searchParams.set("client_id", clientId);
-  u.searchParams.set("scope", scope);
+  u.searchParams.set("scope", scopes);
   u.searchParams.set("redirect_uri", args.redirectUri);
   u.searchParams.set("state", args.state);
 
@@ -60,7 +58,6 @@ export function buildInstallUrl(args: {
 
 /**
  * Verifica HMAC do OAuth callback (querystring).
- * Shopify envia `hmac` e o resto assina com secret.
  */
 export function verifyHmac(query: Record<string, any>, secret: string): boolean;
 export function verifyHmac(args: { query: Record<string, any>; clientSecret: string }): boolean;
@@ -84,7 +81,6 @@ export function verifyHmac(
 
   const digest = crypto.createHmac("sha256", secret).update(message).digest("hex");
 
-  // timing safe
   try {
     return crypto.timingSafeEqual(Buffer.from(digest, "utf8"), Buffer.from(hmac, "utf8"));
   } catch {
@@ -117,13 +113,14 @@ export function verifyWebhookHmac(
 
 /**
  * Troca code por access_token
+ * ✅ Padronizado para retornar { scopes } (plural) porque é o contrato usado no repo/DB.
  */
 export async function exchangeCodeForToken(args: {
   shop: string;
   code: string;
   clientId?: string;
   clientSecret?: string;
-}): Promise<{ access_token: string; scope: string | null }> {
+}): Promise<{ access_token: string; scopes: string | null }> {
   const shop = normalizeShop(args.shop);
   const clientId = args.clientId ?? env.SHOPIFY_CLIENT_ID;
   const clientSecret = args.clientSecret ?? env.SHOPIFY_CLIENT_SECRET;
@@ -149,22 +146,24 @@ export async function exchangeCodeForToken(args: {
 
   return {
     access_token: String(data.access_token),
-    scope: data?.scope ? String(data.scope) : null,
+    // Shopify retorna "scope" (singular) — nós persistimos como "scopes" (plural)
+    scopes: data?.scope ? String(data.scope) : null,
   };
 }
 
 /**
  * Fluxo final: salva token + registra webhooks
+ * ✅ Padronizado para { scopes } (plural)
  */
 export async function finalizeInstall(args: {
   shop: string;
   accessToken: string;
-  scope?: string | null;
+  scopes?: string | null;
 }): Promise<void> {
   await saveShopToken({
     shop: args.shop,
     accessToken: args.accessToken,
-    scope: args.scope ?? null,
+    scopes: args.scopes ?? null,
   });
 
   const client = new ShopifyAdminClient({
