@@ -117,13 +117,14 @@ export function verifyWebhookHmac(
 
 /**
  * Troca code por access_token
+ * Shopify retorna `scope` (singular) => nós persistimos como `scopes` (plural) no Neon
  */
 export async function exchangeCodeForToken(args: {
   shop: string;
   code: string;
   clientId?: string;
   clientSecret?: string;
-}): Promise<{ access_token: string; scope: string | null }> {
+}): Promise<{ access_token: string; scopes: string | null }> {
   const shop = normalizeShop(args.shop);
   const clientId = args.clientId ?? env.SHOPIFY_CLIENT_ID;
   const clientSecret = args.clientSecret ?? env.SHOPIFY_CLIENT_SECRET;
@@ -149,7 +150,7 @@ export async function exchangeCodeForToken(args: {
 
   return {
     access_token: String(data.access_token),
-    scope: data?.scope ? String(data.scope) : null,
+    scopes: data?.scope ? String(data.scope) : null,
   };
 }
 
@@ -159,12 +160,12 @@ export async function exchangeCodeForToken(args: {
 export async function finalizeInstall(args: {
   shop: string;
   accessToken: string;
-  scope?: string | null;
+  scopes?: string | null;
 }): Promise<void> {
   await saveShopToken({
     shop: args.shop,
     accessToken: args.accessToken,
-    scope: args.scope ?? null,
+    scopes: args.scopes ?? null,
   });
 
   const client = new ShopifyAdminClient({

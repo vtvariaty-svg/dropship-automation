@@ -7,13 +7,12 @@ export async function saveShopToken(args: {
   scopes: string | null;
 }): Promise<void> {
   const sql = `
-    insert into shopify_oauth (shop, access_token, scopes, installed_at)
-    values ($1, $2, $3, now())
+    insert into shopify_oauth (shop, access_token, scopes)
+    values ($1, $2, $3)
     on conflict (shop)
     do update set
       access_token = excluded.access_token,
-      scopes = excluded.scopes,
-      installed_at = now()
+      scopes = excluded.scopes
   `;
   await pool.query(sql, [args.shop, args.accessToken, args.scopes]);
 }
@@ -31,17 +30,13 @@ export async function getShopToken(shop: string): Promise<string | null> {
 
 /**
  * Cleanup idempotente para app/uninstalled:
- * - access_token -> NULL
- * - scopes -> NULL
+ * Deleta o registro da shop em shopify_oauth.
+ * - funciona mesmo se access_token for NOT NULL
+ * - reexecuções não falham
  */
 export async function cleanupShopOnUninstall(shop: string): Promise<void> {
   await pool.query(
-    `
-    update shopify_oauth
-    set access_token = null,
-        scopes = null
-    where lower(shop) = lower($1)
-  `,
+    `delete from shopify_oauth where lower(shop) = lower($1)`,
     [shop]
   );
 }

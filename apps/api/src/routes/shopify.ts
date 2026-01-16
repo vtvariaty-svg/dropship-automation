@@ -1,5 +1,11 @@
 import { FastifyPluginAsync } from "fastify";
-import { buildInstallUrl, exchangeCodeForToken, normalizeShop, randomState, verifyHmac } from "../integrations/shopify/oauth";
+import {
+  buildInstallUrl,
+  exchangeCodeForToken,
+  normalizeShop,
+  randomState,
+  verifyHmac,
+} from "../integrations/shopify/oauth";
 
 // Ajuste para o teu store real:
 import { saveShopToken } from "../integrations/shopify/store";
@@ -11,7 +17,9 @@ export const shopifyRoutes: FastifyPluginAsync = async (app) => {
     const appUrl = process.env.APP_URL;
 
     if (!clientId || !scopes || !appUrl) {
-      return reply.code(500).send({ ok: false, error: "Missing SHOPIFY_CLIENT_ID / SHOPIFY_SCOPES / APP_URL" });
+      return reply
+        .code(500)
+        .send({ ok: false, error: "Missing SHOPIFY_CLIENT_ID / SHOPIFY_SCOPES / APP_URL" });
     }
 
     const shopParam = String((request.query as any)?.shop || "");
@@ -39,7 +47,9 @@ export const shopifyRoutes: FastifyPluginAsync = async (app) => {
     const clientSecret = process.env.SHOPIFY_CLIENT_SECRET;
 
     if (!clientId || !clientSecret) {
-      return reply.code(500).send({ ok: false, error: "Missing SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET" });
+      return reply
+        .code(500)
+        .send({ ok: false, error: "Missing SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET" });
     }
 
     const query = request.query as any;
@@ -61,7 +71,7 @@ export const shopifyRoutes: FastifyPluginAsync = async (app) => {
     await saveShopToken({
       shop,
       accessToken: token.access_token,
-      scope: token.scope,
+      scopes: token.scopes,
     });
 
     return reply.send({ ok: true, shop });
