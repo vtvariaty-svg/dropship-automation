@@ -1,18 +1,63 @@
 // apps/api/src/integrations/shopify/store.ts
 import { pool } from "../../db/pool";
 
+/* =====================================================
+   TYPES
+===================================================== */
+
+export type ShopToken = {
+  shop: string;
+  accessToken: string;
+  scopes: string;
+};
+
 export type SaveShopTokenInput = {
   shop: string;
   accessToken: string;
   scopes: string | null;
 };
 
-export async function saveShopToken(input: SaveShopTokenInput): Promise<void> {
-  const shop = String(input.shop).toLowerCase().trim();
-  const accessToken = String(input.accessToken);
+/* =====================================================
+   READ
+===================================================== */
 
-  // ✅ DB tem NOT NULL em scopes → nunca permitir null
-  const scopes = (input.scopes ?? "").trim();
+/**
+ * Carrega token ativo da shop
+ * (usado por admin routes, adapters, etc)
+ */
+export async function getShopToken(shop: string): Promise<ShopToken | null> {
+  const res = await pool.query(
+    `
+    select shop, access_token, scopes
+    from shopify_oauth
+    where lower(shop) = lower($1)
+      and access_token <> ''
+    limit 1
+    `,
+    [shop]
+  );
+
+  if (res.rowCount === 0) return null;
+
+  return {
+    shop: res.rows[0].shop,
+    accessToken: res.rows[0].access_token,
+    scopes: res.rows[0].scopes,
+  };
+}
+
+/* =====================================================
+   WRITE / UPSERT
+===================================================== */
+
+/**
+ * Salva ou atualiza token OAuth
+ * ⚠ scopes NUNCA pode ser NULL (constraint do DB)
+ */
+export async function saveShopToken(input: SaveShopTokenInput): Promise<void> {
+  const shop = input.shop.toLowerCase().trim();
+  const accessToken = String(input.accessToken);
+  const scopes = (input.scopes ?? "").trim(); // NOT NULL safeguard
 
   await pool.query(
     `
@@ -28,10 +73,15 @@ export async function saveShopToken(input: SaveShopTokenInput): Promise<void> {
   );
 }
 
-export async function disableShopToken(args: { shop: string }): Promise<void> {
-  const shop = String(args.shop).toLowerCase().trim();
+/* =====================================================
+   UNINSTALL / CLEANUP
+===================================================== */
 
-  // ✅ “desinstalado” = token desativado (não deletar histórico)
+/**
+ * Limpa token quando app é desinstalado
+ * (idempotente)
+ */
+export async function cleanupShopOnUninstall(shop: string): Promise<void> {
   await pool.query(
     `
     update shopify_oauth
