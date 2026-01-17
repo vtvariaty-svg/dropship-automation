@@ -1,79 +1,125 @@
-import { FastifyPluginAsync } from "fastify";
+// apps/api/src/routes/shopify.ts
+import type { FastifyInstance } from "fastify";
+import { env } from "../env";
 import {
   buildInstallUrl,
   exchangeCodeForToken,
+  finalizeInstall,
   normalizeShop,
   randomState,
   verifyHmac,
 } from "../integrations/shopify/oauth";
 
-// Ajuste para o teu store real:
-import { saveShopToken } from "../integrations/shopify/store";
+export async function shopifyRoutes(app: FastifyInstance) {
+  // GET /shopify/install?shop=xxxxx.myshopify.com
+  app.get("/shopify/install", async (req, reply) => {
+    const shopRaw = String((req.query as any)?.shop ?? "");
+    const shop = normalizeShop(shopRaw);
 
-export const shopifyRoutes: FastifyPluginAsync = async (app) => {
-  app.get("/shopify/install", async (request, reply) => {
-    const clientId = process.env.SHOPIFY_CLIENT_ID;
-    const scopes = process.env.SHOPIFY_SCOPES;
-    const appUrl = process.env.APP_URL;
+    console.log(
+      JSON.stringify({
+        msg: "oauth.install.hit",
+        shop,
+      })
+    );
 
-    if (!clientId || !scopes || !appUrl) {
-      return reply
-        .code(500)
-        .send({ ok: false, error: "Missing SHOPIFY_CLIENT_ID / SHOPIFY_SCOPES / APP_URL" });
+    if (!shop || !shop.endsWith(".myshopify.com")) {
+      return reply.code(400).send({ ok: false, error: "invalid_shop" });
     }
-
-    const shopParam = String((request.query as any)?.shop || "");
-    const shop = normalizeShop(shopParam);
 
     const state = randomState(16);
-    // Se você tiver sessão/cookie, salve o state pra validar depois.
-    // Aqui mantive simples.
 
-    const redirectUri = `${appUrl}/shopify/callback`;
+    // Redirect URI do callback (precisa ser público e igual ao do Partner Dashboard)
+    const redirectUri = `${env.BASE_URL.replace(/\/+$/, "")}/shopify/callback`;
 
-    const url = buildInstallUrl({
+    const installUrl = buildInstallUrl({
       shop,
-      clientId,
-      scopes,
-      redirectUri,
       state,
+      redirectUri,
+      scopes: env.SHOPIFY_SCOPES,
+      clientId: env.SHOPIFY_CLIENT_ID,
     });
 
-    return reply.redirect(url);
+    console.log(
+      JSON.stringify({
+        msg: "oauth.install.redirect",
+        shop,
+        redirectUri,
+        installUrl,
+      })
+    );
+
+    return reply.redirect(installUrl);
   });
 
-  app.get("/shopify/callback", async (request, reply) => {
-    const clientId = process.env.SHOPIFY_CLIENT_ID;
-    const clientSecret = process.env.SHOPIFY_CLIENT_SECRET;
+  // GET /shopify/callback?shop=...&code=...&hmac=...&state=...
+  app.get("/shopify/callback", async (req, reply) => {
+    const q = req.query as any;
 
-    if (!clientId || !clientSecret) {
-      return reply
-        .code(500)
-        .send({ ok: false, error: "Missing SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET" });
+    const shopRaw = String(q?.shop ?? "");
+    const shop = normalizeShop(shopRaw);
+    const code = String(q?.code ?? "");
+
+    console.log(
+      JSON.stringify({
+        msg: "oauth.callback.hit",
+        shop,
+        hasCode: Boolean(code),
+        keys: Object.keys(q ?? {}),
+      })
+    );
+
+    // 1) valida shop + code
+    if (!shop || !shop.endsWith(".myshopify.com")) {
+      console.log(JSON.stringify({ msg: "oauth.callback.invalid_shop", shop }));
+      return reply.code(400).send({ ok: false, error: "invalid_shop" });
+    }
+    if (!code) {
+      console.log(JSON.stringify({ msg: "oauth.callback.missing_code", shop }));
+      return reply.code(400).send({ ok: false, error: "missing_code" });
     }
 
-    const query = request.query as any;
-    const shop = normalizeShop(String(query.shop || ""));
-    const code = String(query.code || "");
+    // 2) valida HMAC
+    const hmacOk = verifyHmac({ query: q, clientSecret: env.SHOPIFY_CLIENT_SECRET });
+    console.log(JSON.stringify({ msg: "oauth.callback.hmac", shop, ok: hmacOk }));
 
-    if (!code) return reply.code(400).send({ ok: false, error: "Missing code" });
+    if (!hmacOk) {
+      return reply.code(400).send({ ok: false, error: "invalid_hmac" });
+    }
 
-    const ok = verifyHmac({ query, clientSecret });
-    if (!ok) return reply.code(401).send({ ok: false, error: "Invalid OAuth HMAC" });
-
-    const token = await exchangeCodeForToken({
+    // 3) troca code por token
+    const tokenRes = await exchangeCodeForToken({
       shop,
-      clientId,
-      clientSecret,
       code,
+      clientId: env.SHOPIFY_CLIENT_ID,
+      clientSecret: env.SHOPIFY_CLIENT_SECRET,
     });
 
-    await saveShopToken({
+    console.log(
+      JSON.stringify({
+        msg: "oauth.callback.token_exchanged",
+        shop,
+        hasToken: Boolean(tokenRes?.access_token),
+        scopes: tokenRes?.scopes ?? null,
+      })
+    );
+
+    // 4) finalizeInstall: salva token + registra webhooks (APP_UNINSTALLED)
+    console.log(JSON.stringify({ msg: "oauth.callback.finalize_install_start", shop }));
+
+    await finalizeInstall({
       shop,
-      accessToken: token.access_token,
-      scopes: token.scopes,
+      accessToken: tokenRes.access_token,
+      scopes: tokenRes.scopes ?? null,
     });
 
-    return reply.send({ ok: true, shop });
+    console.log(JSON.stringify({ msg: "oauth.callback.finalize_install_done", shop }));
+
+    // 5) redirect final (pode ajustar depois)
+    return reply.send({
+      ok: true,
+      shop,
+      installed: true,
+    });
   });
-};
+}
