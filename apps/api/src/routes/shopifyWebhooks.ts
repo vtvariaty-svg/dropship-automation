@@ -1,76 +1,89 @@
 // apps/api/src/routes/shopifyWebhooks.ts
-import type { FastifyInstance } from "fastify";
-import { env } from "../env";
-import { verifyWebhookHmac } from "../integrations/shopify/oauth";
+import type { FastifyPluginAsync } from "fastify";
 import { insertWebhookEvent } from "../integrations/shopify/webhookStore";
+import { verifyWebhookHmac } from "../integrations/shopify/oauth";
 import { cleanupShopOnUninstall } from "../integrations/shopify/store";
 import { pool } from "../db/pool";
+import { env } from "../env";
 
-type WebhookStatus =
-  | "received"
-  | "ok"
-  | "invalid_hmac"
-  | "error"
-  | "uninstalled_cleanup_ok"
-  | "uninstalled_cleanup_error"
-  | string;
+export const shopifyWebhooksRoutes: FastifyPluginAsync = async (app) => {
+  // IMPORTANTE: para validar HMAC, precisamos do body RAW exatamente como veio.
+  // O Fastify permite isso com `addContentTypeParser`.
+  app.addContentTypeParser(
+    "application/json",
+    { parseAs: "buffer" },
+    async (_req: unknown, body: Buffer) => body
+  );
 
-function header(req: any, name: string): string {
-  const v = req.headers?.[name.toLowerCase()];
-  if (Array.isArray(v)) return String(v[0] ?? "");
-  return String(v ?? "");
-}
-
-export async function shopifyWebhooksRoutes(app: FastifyInstance) {
   app.post("/shopify/webhooks", async (req, reply) => {
-    // ⚠ raw body já existe no seu projeto (plugin)
-    const rawBody = String((req as any).rawBody ?? "");
-
-    const hmacHeader = header(req, "X-Shopify-Hmac-Sha256");
-    const topic = header(req, "X-Shopify-Topic");
-    const shop = header(req, "X-Shopify-Shop-Domain");
+    const headers = req.headers as Record<string, string | undefined>;
+    const shop = headers["x-shopify-shop-domain"] || "";
+    const topic = headers["x-shopify-topic"] || "";
     const webhookId =
-      header(req, "X-Shopify-Webhook-Id") || `no-id-${Date.now()}`;
+      headers["x-shopify-webhook-id"] || `no-id-${Date.now()}`;
+    const hmacHeader = headers["x-shopify-hmac-sha256"] || "";
+    const apiVersion = headers["x-shopify-api-version"] || null;
 
-    // 1) validar HMAC
-    const hmacOk = verifyWebhookHmac({
+    // `req.body` aqui é Buffer (por causa do parser acima)
+    const rawBodyBuffer = req.body as Buffer;
+    const rawBody = rawBodyBuffer.toString("utf8");
+
+    const ok = verifyWebhookHmac({
       rawBody,
       hmacHeader,
       secret: env.SHOPIFY_CLIENT_SECRET,
     });
 
-    if (!hmacOk) {
+    if (!ok) {
+      // ✅ Persistir auditoria do inválido (sem quebrar / sem retries infinitos)
       try {
         await insertWebhookEvent({
           webhookId,
           shop,
           topic,
+          payload: {},
+          payloadRaw: rawBody,
+          headers,
+          apiVersion,
           status: "invalid_hmac",
-          body: rawBody, // ✅ contrato correto
         });
-      } catch {}
+      } catch {
+        // silencioso: webhook deve responder rápido
+      }
 
       return reply.code(200).send({ ok: true, status: "invalid_hmac" });
     }
 
-    // 2) persistir evento (idempotente)
+    // Parse payload com segurança
+    let parsedPayload: unknown = {};
+    try {
+      parsedPayload = rawBody ? JSON.parse(rawBody) : {};
+    } catch {
+      parsedPayload = {};
+    }
+
+    // 1) Persistir evento (idempotência fica por conta do DB/índice único)
     try {
       await insertWebhookEvent({
         webhookId,
         shop,
         topic,
-        status: "received",
-        body: rawBody, // ✅ contrato correto
+        payload: parsedPayload,
+        payloadRaw: rawBody,
+        headers,
+        apiVersion,
+        status: "ok",
       });
     } catch {
-      // duplicado = ok
+      // duplicado ou falha de insert: não pode impedir o cleanup do uninstall
     }
 
-    // 3) uninstall real
+    // 2) Fluxo real do app/uninstalled (cleanup token + status)
     if (topic === "app/uninstalled") {
       try {
         await cleanupShopOnUninstall(shop);
 
+        // Atualiza status do evento para auditoria
         try {
           await pool.query(
             `
@@ -80,11 +93,11 @@ export async function shopifyWebhooksRoutes(app: FastifyInstance) {
             `,
             ["uninstalled_cleanup_ok", webhookId]
           );
-        } catch {}
+        } catch {
+          // se a tabela/coluna divergir, não quebra o webhook
+        }
 
-        return reply
-          .code(200)
-          .send({ ok: true, status: "uninstalled_cleanup_ok" });
+        return reply.code(200).send({ ok: true, status: "uninstalled_cleanup_ok" });
       } catch (e) {
         try {
           await pool.query(
@@ -97,13 +110,10 @@ export async function shopifyWebhooksRoutes(app: FastifyInstance) {
           );
         } catch {}
 
-        return reply
-          .code(200)
-          .send({ ok: true, status: "uninstalled_cleanup_error" });
+        return reply.code(200).send({ ok: true, status: "uninstalled_cleanup_error" });
       }
     }
 
-    // 4) outros eventos
-    return reply.code(200).send({ ok: true, status: "ok" });
+    return reply.send({ ok: true, status: "ok" });
   });
-}
+};
