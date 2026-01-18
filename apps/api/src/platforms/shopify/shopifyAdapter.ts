@@ -1,17 +1,31 @@
 // apps/api/src/platforms/shopify/shopifyAdapter.ts
+
 import type { PlatformAdapter } from "../adapter";
-import type { EnsureWebhooksInput, OAuthFinalizeInput, PublishProductInput, PublishProductResult } from "../types";
+import type {
+  EnsureWebhooksInput,
+  OAuthFinalizeInput,
+  PublishProductInput,
+  PublishProductResult,
+} from "../types";
 
 import { env } from "../../env";
-import { normalizeShop, verifyWebhookHmac, finalizeInstall } from "../../integrations/shopify/oauth";
-import { cleanupShopOnUninstall, getShopToken } from "../../integrations/shopify/store";
+import {
+  normalizeShop,
+  verifyWebhookHmac,
+  finalizeInstall,
+} from "../../integrations/shopify/oauth";
+import {
+  cleanupShopOnUninstall,
+  getShopToken,
+} from "../../integrations/shopify/store";
 import { ShopifyAdminClient } from "../../integrations/shopify/adminClient";
 import { ensureCoreWebhooks } from "../../integrations/shopify/webhookRegistrar";
 import { publishProductToShopify } from "../../integrations/shopify/publishProduct";
 
 /**
- * ShopifyAdapter: encapsula detalhes do conector Shopify.
- * Multi-plataforma: core fala com PlatformAdapter; Shopify é só uma implementação.
+ * ShopifyAdapter
+ * Implementação Shopify do contrato PlatformAdapter
+ * (Shopify-first, multi-plataforma ready)
  */
 export const shopifyAdapter: PlatformAdapter = {
   platform: "shopify",
@@ -20,27 +34,39 @@ export const shopifyAdapter: PlatformAdapter = {
     return normalizeShop(input);
   },
 
-  verifyWebhookSignature(args: { rawBody: string; signatureHeader: string; secret: string }): boolean {
-    return verifyWebhookHmac(args.rawBody, args.signatureHeader, args.secret);
+  verifyWebhookSignature(args: {
+    rawBody: string;
+    signatureHeader: string;
+    secret: string;
+  }): boolean {
+    return verifyWebhookHmac(
+      args.rawBody,
+      args.signatureHeader,
+      args.secret
+    );
   },
 
   async finalizeOAuthInstall(input: OAuthFinalizeInput): Promise<void> {
-    // Persistência + registro de webhooks (já existe no fluxo atual)
     await finalizeInstall({
       shop: input.externalId,
       accessToken: input.accessToken,
-      scope: input.scopes ?? null,
+      scopes: input.scopes ?? null,
     });
   },
 
-  async cleanupOnUninstall(args: { externalId: string }): Promise<{ cleaned: boolean }> {
-    // Idempotente: se não existir token, não falha.
-    // (a implementação real está em integrations/shopify/store.ts)
-    const result = await cleanupShopOnUninstall({ shop: args.externalId });
+  async cleanupOnUninstall(args: {
+    externalId: string;
+  }): Promise<{ cleaned: boolean }> {
+    const result = await cleanupShopOnUninstall({
+      shop: args.externalId,
+    });
+
     return { cleaned: Boolean(result?.cleaned ?? true) };
   },
 
-  async ensureCoreWebhooks(input: EnsureWebhooksInput): Promise<void> {
+  async ensureCoreWebhooks(
+    input: EnsureWebhooksInput
+  ): Promise<void> {
     const client = new ShopifyAdminClient({
       shop: input.externalId,
       accessToken: input.accessToken,
@@ -52,7 +78,9 @@ export const shopifyAdapter: PlatformAdapter = {
     });
   },
 
-  async publishProduct(input: PublishProductInput): Promise<PublishProductResult> {
+  async publishProduct(
+    input: PublishProductInput
+  ): Promise<PublishProductResult> {
     const created = await publishProductToShopify({
       shop: input.externalId,
       accessToken: input.accessToken,
@@ -62,7 +90,10 @@ export const shopifyAdapter: PlatformAdapter = {
       price: input.price,
     });
 
-    return { externalId: created.id, handle: created.handle };
+    return {
+      externalId: created.id,
+      handle: created.handle,
+    };
   },
 
   async getAccessToken(args: { externalId: string }) {
@@ -72,8 +103,6 @@ export const shopifyAdapter: PlatformAdapter = {
     return {
       accessToken: token.accessToken,
       scopes: token.scopes ?? null,
-      installedAt: token.installedAt ?? null,
-      revokedAt: token.revokedAt ?? null,
     };
   },
 };
