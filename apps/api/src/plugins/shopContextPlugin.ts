@@ -2,11 +2,7 @@
 import fp from "fastify-plugin";
 import type { FastifyPluginAsync } from "fastify";
 
-declare module "fastify" {
-  interface FastifyRequest {
-    shopDomain?: string;
-  }
-}
+import { resolveShopifyTenant } from "../tenancy/tenant";
 
 const plugin: FastifyPluginAsync = async (app) => {
   app.addHook("preHandler", async (req) => {
@@ -19,6 +15,11 @@ const plugin: FastifyPluginAsync = async (app) => {
       undefined;
 
     req.shopDomain = shop;
+
+    // Prepara multi-tenant (hoje: Shopify). No futuro, o tenant virá do session token.
+    if (shop) {
+      req.tenant = resolveShopifyTenant(shop);
+    }
   });
 };
 
