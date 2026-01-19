@@ -1,48 +1,48 @@
-// apps/api/src/platforms/types.ts
+export type Platform = 'shopify' | 'woocommerce' | 'shopee';
 
-export type Platform = "shopify" | "woocommerce" | "mercadolivre" | "shopee" | "amazon";
-
-/**
- * Identidade "interna" do tenant/store no SaaS.
- * - platform: qual conector/adaptador usar
- * - externalId: identificador na plataforma (Shopify = shop domain)
- */
-export type TenantRef = {
-  tenantId: string;
-  platform: Platform;
-  externalId: string;
-};
-
-export type AccessTokenRecord = {
+export interface ShopToken {
+  shop: string;
   accessToken: string;
-  scopes?: string | null;
-  installedAt?: string | null;
-  revokedAt?: string | null;
-};
+  scopes: string;
+  installedAt: Date;
+  revokedAt?: Date | null;
+}
 
-export type OAuthFinalizeInput = {
-  externalId: string; // shop domain no caso Shopify
+export interface ExchangeTokenInput {
+  shop: string;
+  code: string;
+}
+
+export interface ExchangeTokenResult {
   accessToken: string;
-  scopes?: string | null;
-};
+  scopes: string;
+}
 
-export type PublishProductInput = {
-  externalId: string; // shop domain (Shopify) / storeId (outras)
-  accessToken: string;
+export interface VerifyWebhookInput {
+  rawBody: string;
+  signatureHeader: string;
+  secret: string;
+}
 
+export interface PublishProductInput {
+  shop: string;
   title: string;
-  descriptionHtml: string;
-  images: string[];
   price: number;
-};
+}
 
-export type PublishProductResult = {
-  externalId: string; // product id na plataforma
-  handle?: string;
-};
-
-export type EnsureWebhooksInput = {
+export interface PublishProductResult {
   externalId: string;
-  accessToken: string;
-  callbackBaseUrl: string;
-};
+  handle: string;
+}
+
+export interface CleanupResult {
+  ok: boolean;
+  deleted: boolean;
+}
+
+export interface PlatformAdapter {
+  exchangeToken(input: ExchangeTokenInput): Promise<ExchangeTokenResult>;
+  verifyWebhook(input: VerifyWebhookInput): boolean;
+  publishProduct(input: PublishProductInput): Promise<PublishProductResult>;
+  cleanupShop(shop: string): Promise<CleanupResult>;
+}
