@@ -1,125 +1,76 @@
-// apps/api/src/integrations/shopify/oauth.ts
 import crypto from "crypto";
-import fetch from "node-fetch";
 import { saveShopToken } from "./store";
 
-export function normalizeShop(shop: string): string {
-  return shop.trim().toLowerCase();
+export const adminGraphQLEndpoint = (shop: string) =>
+  `https://${shop}/admin/api/2024-01/graphql.json`;
+
+interface ExchangeTokenResult {
+  accessToken: string;
+  scopes: string | null;
 }
 
-export function randomState(len = 16): string {
-  return crypto.randomBytes(len).toString("hex");
-}
-
-export function buildInstallUrl(args: {
-  shop: string;
-  clientId: string;
-  scopes: string;
-  redirectUri: string;
-  state: string;
-}): string {
-  const shop = normalizeShop(args.shop);
-  const params = new URLSearchParams({
-    client_id: args.clientId,
-    scope: args.scopes,
-    redirect_uri: args.redirectUri,
-    state: args.state,
-  });
-
-  return `https://${shop}/admin/oauth/authorize?${params.toString()}`;
-}
-
-export function verifyHmac(args: { query: Record<string, any>; clientSecret: string }): boolean {
-  const query = { ...args.query };
-  const sentHmac = String(query.hmac || "");
-  delete query.hmac;
-  delete query.signature;
-
-  const message = Object.keys(query)
-    .sort()
-    .map((k) => `${k}=${Array.isArray(query[k]) ? query[k].join(",") : query[k]}`)
-    .join("&");
-
-  const computed = crypto.createHmac("sha256", args.clientSecret).update(message).digest("hex");
-  return safeCompare(computed, sentHmac);
-}
-
-export function verifyWebhookHmac(args: {
-  rawBody: string;
-  hmacHeader: string | undefined;
-  clientSecret: string;
-}): boolean {
-  const hmacHeader = args.hmacHeader || "";
-  if (!hmacHeader) return false;
-  const computed = crypto.createHmac("sha256", args.clientSecret).update(args.rawBody, "utf8").digest("base64");
-  return safeCompare(computed, hmacHeader);
-}
-
-function safeCompare(a: string, b: string): boolean {
-  try {
-    const aBuf = Buffer.from(a);
-    const bBuf = Buffer.from(b);
-    if (aBuf.length !== bBuf.length) return false;
-    return crypto.timingSafeEqual(aBuf, bBuf);
-  } catch {
-    return false;
-  }
-}
-
-export async function exchangeCodeForToken(args: {
+export async function exchangeCodeForToken(params: {
   shop: string;
   code: string;
-  clientId?: string;
-  clientSecret?: string;
-  // Fallback used only if Shopify response omits scopes for any reason.
-  requestedScopes?: string;
-}): Promise<{ access_token: string; scopes: string }> {
-  const shop = normalizeShop(args.shop);
-  const client_id = args.clientId || process.env.SHOPIFY_CLIENT_ID;
-  const client_secret = args.clientSecret || process.env.SHOPIFY_CLIENT_SECRET;
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+}): Promise<ExchangeTokenResult> {
+  const tokenUrl = `https://${params.shop}/admin/oauth/access_token`;
 
-  if (!client_id || !client_secret) throw new Error("Missing SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET");
-
-  const url = `https://${shop}/admin/oauth/access_token`;
-
-  const resp = await fetch(url, {
+  const res = await fetch(tokenUrl, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      client_id,
-      client_secret,
-      code: args.code,
+      client_id: params.clientId,
+      client_secret: params.clientSecret,
+      code: params.code,
+      redirect_uri: params.redirectUri,
     }),
   });
 
-  if (!resp.ok) {
-    const txt = await resp.text();
-    throw new Error(`Token exchange failed (${resp.status}): ${txt}`);
+  if (!res.ok) {
+    throw new Error(`Shopify token exchange failed (${res.status})`);
   }
 
-  const data = (await resp.json()) as any;
-  const access_token = String(data.access_token || "");
-  const scopes = String(data.scope || data.scopes || args.requestedScopes || "").trim();
+  const data = (await res.json()) as {
+    access_token: string;
+    scope?: string;
+  };
 
-  if (!access_token) throw new Error("Token exchange: missing access_token");
-  if (!scopes) throw new Error("Token exchange: missing scopes (SHOPIFY_SCOPES must be set)");
-
-  return { access_token, scopes };
+  return {
+    accessToken: String(data.access_token),
+    scopes: data.scope ?? null,
+  };
 }
 
-// Optional convenience: install + persist in one call (not used everywhere yet)
 export async function finalizeInstall(args: {
   shop: string;
-  code: string;
-  requestedScopes?: string;
-}): Promise<{ shop: string }> {
-  const token = await exchangeCodeForToken({
+  accessToken: string;
+  scopes: string | null;
+}) {
+  await saveShopToken({
     shop: args.shop,
-    code: args.code,
-    requestedScopes: args.requestedScopes || process.env.SHOPIFY_SCOPES,
+    accessToken: args.accessToken,
+    scopes: args.scopes,
   });
+}
 
-  await saveShopToken({ shop: normalizeShop(args.shop), accessToken: token.access_token, scopes: token.scopes });
+export function verifyShopifyHmac(params: {
+  query: Record<string, string>;
+  secret: string;
+}): boolean {
+  const { hmac, ...rest } = params.query;
 
-  return { shop: normalizeShop(args.shop) };
+  const message = Object.keys(rest)
+    .sort()
+    .map((key) => `${key}=${rest[key]}`)
+    .join("&");
+
+  const generated = crypto
+    .createHmac("sha256", params.secret)
+    .update(message)
+    .digest("hex");
+
+  return generated === hmac;
 }
