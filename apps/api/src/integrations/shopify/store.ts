@@ -1,66 +1,53 @@
 // apps/api/src/integrations/shopify/store.ts
-// Token store (DB) - schema esperado:
-//   shopify_oauth(shop text primary key, access_token text not null, scopes text not null, ...)
+import { pool } from "../../db/pool";
 
-import { q } from "../../db/pool";
-
-export type ShopTokenRow = {
+export type ShopOAuthRow = {
   shop: string;
   access_token: string;
   scopes: string;
+  installed_at?: Date;
+  revoked_at?: Date | null;
 };
 
-export type SaveShopTokenInput = {
+export async function saveShopToken(args: {
   shop: string;
   accessToken: string;
-
-  // compat: pode vir como scope OU scopes
-  scope?: string | null;
-  scopes?: string | null;
-};
-
-export async function saveShopToken(input: SaveShopTokenInput): Promise<void> {
-  const shop = input.shop.toLowerCase();
-  const scopes = (input.scopes ?? input.scope ?? "").trim();
-
-  // se scopes vier vazio, salva pelo menos string vazia? NÃO. Seu DB está NOT NULL.
-  if (!scopes) {
-    throw new Error("saveShopToken: scopes is required (DB column shopify_oauth.scopes is NOT NULL)");
-  }
-
-  await q(
-    `
-    insert into shopify_oauth (shop, access_token, scopes)
-    values ($1, $2, $3)
+  scopes: string;
+}): Promise<void> {
+  const sql = `
+    insert into shopify_oauth (shop, access_token, scopes, installed_at, revoked_at)
+    values ($1, $2, $3, now(), null)
     on conflict (shop)
-    do update set
-      access_token = excluded.access_token,
-      scopes = excluded.scopes
-    `,
-    [shop, input.accessToken, scopes]
-  );
+    do update set access_token = excluded.access_token,
+                 scopes = excluded.scopes,
+                 installed_at = now(),
+                 revoked_at = null
+  `;
+  await pool.query(sql, [args.shop, args.accessToken, args.scopes]);
 }
 
-export async function getShopToken(shop: string): Promise<ShopTokenRow | null> {
-  const rows = await q<ShopTokenRow>(
-    `select shop, access_token, scopes from shopify_oauth where lower(shop) = lower($1) limit 1`,
-    [shop]
-  );
-  return rows[0] ?? null;
+export async function getShopToken(shop: string): Promise<ShopOAuthRow | null> {
+  const sql = `
+    select shop, access_token, scopes, installed_at, revoked_at
+    from shopify_oauth
+    where lower(shop) = lower($1)
+    limit 1
+  `;
+  const res = await pool.query(sql, [shop]);
+  return (res.rows?.[0] as ShopOAuthRow) ?? null;
 }
 
-export type CleanupResult = { deleted: boolean };
-
-export async function cleanupShopOnUninstall(shop: string): Promise<CleanupResult> {
-  const rows = await q<{ shop: string }>(
-    `delete from shopify_oauth where lower(shop) = lower($1) returning shop`,
-    [shop]
-  );
-
-  return { deleted: rows.length > 0 };
-}
-
-// alias compat (se algum arquivo ainda estiver chamando deleteShopToken)
-export async function deleteShopToken(shop: string): Promise<CleanupResult> {
-  return cleanupShopOnUninstall(shop);
+/**
+ * Mantém histórico de uninstall sem necessariamente apagar a linha.
+ * (Você pode trocar para DELETE se preferir.)
+ */
+export async function cleanupShopOnUninstall(shop: string): Promise<{ deleted: boolean }> {
+  const sql = `
+    update shopify_oauth
+    set access_token = '',
+        revoked_at = now()
+    where lower(shop) = lower($1)
+  `;
+  const res = await pool.query(sql, [shop]);
+  return { deleted: (res.rowCount || 0) > 0 };
 }

@@ -1,48 +1,69 @@
-export type Platform = 'shopify' | 'woocommerce' | 'shopee';
+// apps/api/src/platforms/types.ts
 
-export interface ShopToken {
-  shop: string;
+export type PlatformKey = "shopify" | "woocommerce" | "shopee" | "custom";
+
+export type AccessTokenRecord = {
+  platform: PlatformKey;
+  tenantId: string; // no Shopify: o próprio shop (myshopify.com)
   accessToken: string;
-  scopes: string;
-  installedAt: Date;
-  revokedAt?: Date | null;
-}
+  scopes: string; // CSV de scopes
+  installedAt?: string; // ISO string (opcional)
+  revokedAt?: string | null; // ISO string (opcional)
+};
 
-export interface ExchangeTokenInput {
+export type VerifyHmacInput = {
+  query: Record<string, any>;
+  secret: string;
+};
+
+export type OAuthInstallUrlInput = {
   shop: string;
+  clientId: string;
+  scopes: string;
+  redirectUri: string;
+  state: string;
+};
+
+export type ExchangeTokenInput = {
+  shop: string;
+  clientId: string;
+  clientSecret: string;
   code: string;
-}
+};
 
-export interface ExchangeTokenResult {
+export type ExchangeTokenResult = {
   accessToken: string;
-  scopes: string;
-}
+  scopes: string; // Shopify devolve "scope" (singular) no OAuth, mas aqui normalizamos para scopes (string)
+};
 
-export interface VerifyWebhookInput {
+export type VerifyWebhookInput = {
   rawBody: string;
   signatureHeader: string;
   secret: string;
-}
+};
 
-export interface PublishProductInput {
+export type EnsureWebhooksArgs = {
   shop: string;
-  title: string;
-  price: number;
-}
+  accessToken: string;
+  webhookUrlBase: string; // ex: https://seu-backend.onrender.com
+};
 
-export interface PublishProductResult {
-  externalId: string;
-  handle: string;
-}
-
-export interface CleanupResult {
+export type EnsureWebhooksResult = {
   ok: boolean;
-  deleted: boolean;
-}
+  created?: string[];
+  errors?: Array<{ topic?: string; message: string }>;
+};
 
-export interface PlatformAdapter {
-  exchangeToken(input: ExchangeTokenInput): Promise<ExchangeTokenResult>;
-  verifyWebhook(input: VerifyWebhookInput): boolean;
-  publishProduct(input: PublishProductInput): Promise<PublishProductResult>;
-  cleanupShop(shop: string): Promise<CleanupResult>;
-}
+export type PublishProductInput = {
+  shop: string;
+  accessToken: string;
+  title: string;
+  descriptionHtml?: string;
+};
+
+export type PublishProductResult = {
+  ok: boolean;
+  externalId: string; // id do produto na plataforma
+  handle?: string;
+  cleaned?: boolean;
+};

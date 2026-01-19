@@ -1,74 +1,38 @@
+// apps/api/src/integrations/shopify/publishProduct.ts
+import type { PublishProductInput, PublishProductResult } from "../../platforms/types";
 import { shopifyGraphQL } from "./client";
 
-export type ShopifyPublishProductParams = {
-  shop: string;
-  accessToken: string;
-  title: string;
-  descriptionHtml: string;
-  images: string[];
-  price: number;
-};
-
-export type ShopifyPublishProductResult = {
-  externalId: string; // product id na plataforma
-  handle: string;
-};
-
-/**
- * MVP de publicação: cria Product via GraphQL e devolve id/handle.
- * (Preço/imagens podem evoluir depois; por enquanto mantém o build estável.)
- */
-export async function publishProductToShopify(
-  params: ShopifyPublishProductParams
-): Promise<ShopifyPublishProductResult> {
+export async function publishProductShopify(input: PublishProductInput): Promise<PublishProductResult> {
   const mutation = `
     mutation ProductCreate($input: ProductInput!) {
       productCreate(input: $input) {
-        product {
-          id
-          handle
-        }
-        userErrors {
-          field
-          message
-        }
+        product { id handle }
+        userErrors { field message }
       }
     }
   `;
 
   const variables = {
     input: {
-      title: params.title,
-      descriptionHtml: params.descriptionHtml,
+      title: input.title,
+      descriptionHtml: input.descriptionHtml || "",
     },
   };
 
-  const response = await shopifyGraphQL<{
-    data?: {
-      productCreate?: {
-        product?: { id: string; handle: string };
-        userErrors?: Array<{ field?: string[]; message: string }>;
-      };
+  const data = await shopifyGraphQL<{
+    productCreate: {
+      product: { id: string; handle: string } | null;
+      userErrors: Array<{ field?: string[]; message: string }>;
     };
-    errors?: unknown;
-  }>(params.shop, params.accessToken, mutation, variables);
+  }>(input.shop, input.accessToken, mutation, variables);
 
-  const userErrors = response?.data?.productCreate?.userErrors ?? [];
-  if (userErrors.length) {
-    throw new Error(
-      `Shopify productCreate userErrors: ${JSON.stringify(userErrors)}`
-    );
+  const errs = data.productCreate.userErrors || [];
+  if (errs.length) {
+    return { ok: false, externalId: "", cleaned: false };
   }
 
-  const product = response?.data?.productCreate?.product;
-  if (!product?.id || !product?.handle) {
-    throw new Error(`Shopify productCreate returned no product`);
-  }
+  const p = data.productCreate.product;
+  if (!p?.id) return { ok: false, externalId: "", cleaned: false };
 
-  return { externalId: product.id, handle: product.handle };
+  return { ok: true, externalId: p.id, handle: p.handle, cleaned: true };
 }
-
-/**
- * Alias para compat com chamadas antigas (se existir import `publishProduct`).
- */
-export const publishProduct = publishProductToShopify;

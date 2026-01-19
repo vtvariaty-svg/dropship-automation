@@ -1,87 +1,77 @@
-import type { FastifyInstance } from "fastify";
-import { env } from "../env";
-import {
-  buildInstallUrl,
-  normalizeShop,
-  randomState,
-  verifyHmac,
-  exchangeCodeForToken,
-} from "../integrations/shopify/oauth";
+// apps/api/src/routes/shopify.ts
+import { FastifyPluginAsync } from "fastify";
+import { ShopifyAdapter } from "../platforms/shopify/shopifyAdapter";
 import { saveShopToken } from "../integrations/shopify/store";
 
-export async function shopifyRoutes(app: FastifyInstance) {
-  // /shopify/install?shop=xxx.myshopify.com
-  app.get("/install", async (req, reply) => {
-    const shopRaw = String((req.query as any)?.shop ?? "");
-    const shop = normalizeShop(shopRaw);
+export const shopifyRoutes: FastifyPluginAsync = async (app) => {
+  const adapter = new ShopifyAdapter();
 
-    if (!shop) {
-      return reply.status(400).send({ ok: false, error: "Missing shop" });
+  app.get("/shopify/install", async (request, reply) => {
+    const clientId = process.env.SHOPIFY_CLIENT_ID || "";
+    const scopes = process.env.SHOPIFY_SCOPES || "";
+    const appUrl = process.env.APP_URL || "";
+
+    if (!clientId || !scopes || !appUrl) {
+      return reply.code(500).send({ ok: false, error: "Missing SHOPIFY_CLIENT_ID / SHOPIFY_SCOPES / APP_URL" });
     }
 
-    const state = randomState();
-    reply.setCookie("shopify_oauth_state", state, {
-      path: "/",
-      httpOnly: true,
-      sameSite: "lax",
-      secure: env.NODE_ENV === "production",
-    });
+    const shopParam = String((request.query as any)?.shop || "");
+    const shop = adapter.normalizeTenant(shopParam);
 
-    const installUrl = buildInstallUrl({
+    const state = "state_" + Date.now(); // simples (pode evoluir depois)
+    const redirectUri = `${appUrl}/shopify/callback`;
+
+    const url = adapter.buildInstallUrl({
       shop,
-      clientId: env.SHOPIFY_CLIENT_ID,
-      redirectUri: env.SHOPIFY_REDIRECT_URI,
-      scopesCsv: env.SHOPIFY_SCOPES,
+      clientId,
+      scopes,
+      redirectUri,
       state,
     });
 
-    return reply.redirect(installUrl);
+    return reply.redirect(url);
   });
 
-  // /shopify/callback?code=...&shop=...&hmac=...&state=...
-  app.get("/callback", async (req, reply) => {
-    const q = (req.query as any) ?? {};
-    const shop = normalizeShop(String(q.shop ?? ""));
-    const code = String(q.code ?? "");
-    const state = String(q.state ?? "");
+  app.get("/shopify/callback", async (request, reply) => {
+    const clientId = process.env.SHOPIFY_CLIENT_ID || "";
+    const clientSecret = process.env.SHOPIFY_CLIENT_SECRET || "";
+    const appUrl = process.env.APP_URL || "";
 
-    if (!shop || !code) {
-      return reply.status(400).send({ ok: false, error: "Missing shop or code" });
+    if (!clientId || !clientSecret || !appUrl) {
+      return reply.code(500).send({ ok: false, error: "Missing SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET / APP_URL" });
     }
 
-    const savedState = String((req.cookies as any)?.shopify_oauth_state ?? "");
-    if (!savedState || savedState !== state) {
-      return reply.status(401).send({ ok: false, error: "Invalid state" });
-    }
+    const query = request.query as any;
+    const shop = adapter.normalizeTenant(String(query.shop || ""));
+    const code = String(query.code || "");
 
-    const hmacOk = verifyHmac({
-      query: q,
-      clientSecret: env.SHOPIFY_CLIENT_SECRET,
-    });
-    if (!hmacOk) {
-      return reply.status(401).send({ ok: false, error: "Invalid HMAC" });
-    }
+    if (!shop) return reply.code(400).send({ ok: false, error: "Missing shop" });
+    if (!code) return reply.code(400).send({ ok: false, error: "Missing code" });
 
-    const tokenRes = await exchangeCodeForToken({
+    const ok = adapter.verifyHmac({ query, secret: clientSecret });
+    if (!ok) return reply.code(401).send({ ok: false, error: "Invalid OAuth HMAC" });
+
+    const token = await adapter.exchangeCodeForToken({
       shop,
+      clientId,
+      clientSecret,
       code,
-      clientId: env.SHOPIFY_CLIENT_ID,
-      clientSecret: env.SHOPIFY_CLIENT_SECRET,
-      redirectUri: env.SHOPIFY_REDIRECT_URI,
     });
 
     await saveShopToken({
       shop,
-      accessToken: tokenRes.accessToken,
-      scopes: tokenRes.scopes ?? env.SHOPIFY_SCOPES,
+      accessToken: token.accessToken,
+      scopes: token.scopes,
     });
 
-    // aqui você pode redirecionar pra UI embutida depois
-    return reply.send({
-      ok: true,
+    // opcional: registrar webhooks automaticamente após install
+    const webhookUrlBase = process.env.WEBHOOK_URL_BASE || appUrl;
+    await adapter.ensureWebhooks({
       shop,
-      scopes: tokenRes.scopes ?? env.SHOPIFY_SCOPES,
-      message: "Shop installed and token stored",
+      accessToken: token.accessToken,
+      webhookUrlBase,
     });
+
+    return reply.send({ ok: true, shop });
   });
-}
+};

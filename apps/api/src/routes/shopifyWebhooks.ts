@@ -1,62 +1,54 @@
 // apps/api/src/routes/shopifyWebhooks.ts
-
-import { FastifyInstance } from "fastify";
-import { env } from "../env";
-import { insertWebhookEvent } from "../integrations/shopify/webhookStore";
-import { verifyWebhookHmac } from "../integrations/shopify/oauth";
+import { FastifyPluginAsync } from "fastify";
+import { ShopifyAdapter } from "../platforms/shopify/shopifyAdapter";
 import { cleanupShopOnUninstall } from "../integrations/shopify/store";
+import { insertWebhookEvent } from "../integrations/shopify/webhookStore";
 
-export async function shopifyWebhooksRoutes(app: FastifyInstance) {
-  // OBS: para webhook HMAC ser validável, você precisa do raw body.
-  // Se seu fastify já está setando req.rawBody via plugin/hook, ok.
-  // Aqui fazemos fallback seguro: tenta obter string de req.body se já veio como string.
-  app.post("/shopify/webhooks", async (req, reply) => {
-    const headers = req.headers as Record<string, any>;
-    const topic = String(headers["x-shopify-topic"] || "");
-    const shop = String(headers["x-shopify-shop-domain"] || "").toLowerCase();
-    const webhookId = String(headers["x-shopify-webhook-id"] || cryptoRandomId());
-    const hmac = String(headers["x-shopify-hmac-sha256"] || "");
+export const shopifyWebhooksRoutes: FastifyPluginAsync = async (app) => {
+  const adapter = new ShopifyAdapter();
 
+  app.post("/shopify/webhooks", async (request, reply) => {
+    const secret = process.env.SHOPIFY_WEBHOOK_SECRET || process.env.SHOPIFY_CLIENT_SECRET || "";
+    if (!secret) return reply.code(500).send({ ok: false, error: "Missing SHOPIFY_WEBHOOK_SECRET/SHOPIFY_CLIENT_SECRET" });
+
+    // Fastify pode não tipar rawBody; pegamos via any
     const rawBody =
-      (req as any).rawBody ??
-      (typeof req.body === "string" ? req.body : JSON.stringify(req.body ?? {}));
+      (request as any).rawBody?.toString?.("utf8") ||
+      (request as any).bodyRaw?.toString?.("utf8") ||
+      (typeof (request as any).body === "string" ? (request as any).body : JSON.stringify((request as any).body || {}));
 
-    // Verifica HMAC do webhook
-    const ok = verifyWebhookHmac(String(rawBody), hmac, env.SHOPIFY_CLIENT_SECRET);
-    if (!ok) {
-      await insertWebhookEvent({
-        webhook_id: webhookId,
-        shop,
-        topic,
-        status: "invalid_hmac",
-        payload: req.body ?? null,
-        payloadRaw: String(rawBody),
-        headers,
-      });
-      return reply.code(401).send({ ok: false, error: "invalid webhook hmac" });
-    }
+    const hmacHeader =
+      String((request.headers["x-shopify-hmac-sha256"] as any) || "");
+
+    const topic =
+      String((request.headers["x-shopify-topic"] as any) || "").toLowerCase();
+
+    const shop =
+      String((request.headers["x-shopify-shop-domain"] as any) || "").toLowerCase();
+
+    const webhookId =
+      String((request.headers["x-shopify-webhook-id"] as any) || `evt_${Date.now()}`);
+
+    const ok = adapter.verifyWebhookHmac({
+      rawBody,
+      signatureHeader: hmacHeader,
+      secret,
+    });
 
     await insertWebhookEvent({
       webhook_id: webhookId,
       shop,
       topic,
-      status: "received",
-      payload: req.body ?? null,
-      payloadRaw: String(rawBody),
-      headers,
+      status: ok ? "received" : "failed",
     });
 
-    // Se desinstalou, limpa token
-    if (topic === "app/uninstalled" && shop) {
-      const result = await cleanupShopOnUninstall(shop);
-      return reply.send({ ok: true, topic, cleanup: result });
+    if (!ok) return reply.code(401).send({ ok: false });
+
+    // ação por tópico
+    if (topic === "app/uninstalled") {
+      await cleanupShopOnUninstall(shop);
     }
 
-    return reply.send({ ok: true, topic });
+    return reply.send({ ok: true });
   });
-}
-
-function cryptoRandomId(): string {
-  // sem depender de crypto.randomUUID pra evitar qualquer ambiente antigo
-  return Math.random().toString(16).slice(2) + Date.now().toString(16);
-}
+};

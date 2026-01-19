@@ -1,5 +1,4 @@
 // apps/api/src/integrations/shopify/client.ts
-
 import { adminGraphQLEndpoint } from "./oauth";
 
 export async function shopifyGraphQL<T>(
@@ -19,9 +18,20 @@ export async function shopifyGraphQL<T>(
 
   const json = (await res.json()) as any;
 
-  if (!res.ok || json?.errors) {
-    throw new Error(`Shopify GraphQL error: ${res.status} ${JSON.stringify(json)}`);
+  if (!res.ok || json.errors) {
+    throw new Error(`Shopify GraphQL error: ${JSON.stringify(json)}`);
   }
 
   return json.data as T;
+}
+
+/**
+ * Export que seus erros citam.
+ * Isso evita “no exported member createShopifyAdminClient”.
+ */
+export function createShopifyAdminClient(args: { shop: string; accessToken: string }) {
+  return {
+    graphql: <T>(query: string, variables?: Record<string, unknown>) =>
+      shopifyGraphQL<T>(args.shop, args.accessToken, query, variables),
+  };
 }

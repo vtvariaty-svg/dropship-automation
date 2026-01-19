@@ -1,94 +1,51 @@
 // apps/api/src/integrations/shopify/webhookRegistrar.ts
-import { ShopifyAdminClient } from "./adminClient";
+import type { EnsureWebhooksArgs, EnsureWebhooksResult } from "../../platforms/types";
+import { shopifyGraphQL } from "./client";
 
-type EnsureWebhooksArgs = {
-  client: ShopifyAdminClient;
-  callbackBaseUrl: string;
-};
+const TOPICS: string[] = [
+  "APP_UNINSTALLED",
+  // adicione outros depois:
+  // "PRODUCTS_CREATE",
+  // "PRODUCTS_UPDATE",
+];
 
-type WebhooksQueryResponse = {
-  webhooks: {
-    edges: {
-      node: {
-        id: string;
-        topic: string;
-        endpoint: {
-          __typename: string;
+export async function ensureShopifyWebhooks(args: EnsureWebhooksArgs): Promise<EnsureWebhooksResult> {
+  const created: string[] = [];
+  const errors: Array<{ topic?: string; message: string }> = [];
+
+  for (const topic of TOPICS) {
+    try {
+      const callbackUrl = `${args.webhookUrlBase}/shopify/webhooks`;
+
+      const mutation = `
+        mutation WebhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $callbackUrl: URL!) {
+          webhookSubscriptionCreate(topic: $topic, webhookSubscription: { callbackUrl: $callbackUrl, format: JSON }) {
+            webhookSubscription { id topic }
+            userErrors { field message }
+          }
+        }
+      `;
+
+      const data = await shopifyGraphQL<{
+        webhookSubscriptionCreate: {
+          webhookSubscription: { id: string; topic: string } | null;
+          userErrors: Array<{ field?: string[]; message: string }>;
         };
-      };
-    }[];
-  };
-};
+      }>(args.shop, args.accessToken, mutation, { topic, callbackUrl });
 
-export async function ensureCoreWebhooks({
-  client,
-  callbackBaseUrl,
-}: EnsureWebhooksArgs): Promise<void> {
-  const callbackUrl = `${callbackBaseUrl}/shopify/webhooks`;
-
-  const response = await client.graphql<WebhooksQueryResponse>(`
-    query {
-      webhooks(first: 100) {
-        edges {
-          node {
-            id
-            topic
-            endpoint {
-              __typename
-            }
-          }
-        }
+      const uerr = data.webhookSubscriptionCreate.userErrors || [];
+      if (uerr.length) {
+        errors.push({ topic, message: uerr.map((e) => e.message).join(" | ") });
+        continue;
       }
-    }
-  `);
 
-  // TS strict + produção: se não vier data, falha com mensagem clara.
-  if (!response || !("data" in response) || !response.data) {
-    throw new Error("Shopify GraphQL returned no data for webhooks query");
+      if (data.webhookSubscriptionCreate.webhookSubscription?.id) {
+        created.push(topic);
+      }
+    } catch (e: any) {
+      errors.push({ topic, message: String(e?.message || e) });
+    }
   }
 
-  const topics = new Set(
-    response.data.webhooks.edges.map(
-      (edge: WebhooksQueryResponse["webhooks"]["edges"][number]) =>
-        edge.node.topic
-    )
-  );
-
-  if (!topics.has("APP_UNINSTALLED")) {
-    const createRes = await client.graphql<{
-      webhookSubscriptionCreate: {
-        userErrors: { field: string[] | null; message: string }[];
-        webhookSubscription: { id: string } | null;
-      };
-    }>(`
-      mutation {
-        webhookSubscriptionCreate(
-          topic: APP_UNINSTALLED
-          webhookSubscription: {
-            callbackUrl: "${callbackUrl}"
-            format: JSON
-          }
-        ) {
-          userErrors {
-            field
-            message
-          }
-          webhookSubscription {
-            id
-          }
-        }
-      }
-    `);
-
-    if (!createRes || !("data" in createRes) || !createRes.data) {
-      throw new Error("Shopify GraphQL returned no data for webhook create mutation");
-    }
-
-    const errs = createRes.data.webhookSubscriptionCreate.userErrors ?? [];
-    if (errs.length > 0) {
-      throw new Error(
-        `Shopify webhook create failed: ${errs.map((e) => e.message).join("; ")}`
-      );
-    }
-  }
+  return { ok: errors.length === 0, created, errors: errors.length ? errors : undefined };
 }

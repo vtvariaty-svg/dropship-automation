@@ -1,61 +1,30 @@
 // apps/api/src/platforms/adapter.ts
 import type {
-  AccessTokenRecord,
-  EnsureWebhooksInput,
-  OAuthFinalizeInput,
-  Platform,
+  EnsureWebhooksArgs,
+  EnsureWebhooksResult,
+  ExchangeTokenInput,
+  ExchangeTokenResult,
+  OAuthInstallUrlInput,
   PublishProductInput,
   PublishProductResult,
+  VerifyHmacInput,
+  VerifyWebhookInput,
 } from "./types";
 
-/**
- * Contrato estável para qualquer plataforma.
- * Shopify é só a primeira implementação.
- *
- * Regras:
- * - "externalId" = identificador da loja na plataforma
- *   (Shopify: shop domain; Woo: store id/url; etc.)
- * - O core chama o adapter; o adapter encapsula detalhes (GraphQL/REST/HMAC/etc.)
- */
 export interface PlatformAdapter {
-  readonly platform: Platform;
+  key: string;
 
-  /** Normaliza o externalId para forma canônica (Shopify: lowercase, sem https). */
-  normalizeExternalId(input: string): string;
+  normalizeTenant(input: string): string;
 
-  /**
-   * Valida HMAC do webhook (se a plataforma suportar assinatura).
-   * Retorna true/false; nunca lança por mismatch.
-   */
-  verifyWebhookSignature(args: { rawBody: string; signatureHeader: string; secret: string }): boolean;
+  buildInstallUrl(input: OAuthInstallUrlInput): string;
 
-  /**
-   * Finaliza instalação: persistir token + registrar webhooks essenciais.
-   * Deve ser idempotente do ponto de vista de persistência (upsert).
-   */
-  finalizeOAuthInstall(input: OAuthFinalizeInput): Promise<void>;
+  verifyHmac(input: VerifyHmacInput): boolean;
 
-  /**
-   * Limpeza ao receber uninstall/desautorização.
-   * Deve ser idempotente (reentregas não podem falhar).
-   */
-  cleanupOnUninstall(args: { externalId: string }): Promise<{ cleaned: boolean }>;
+  exchangeCodeForToken(input: ExchangeTokenInput): Promise<ExchangeTokenResult>;
 
-  /**
-   * Garante webhooks essenciais (se aplicável).
-   * Não precisa ser chamado sempre; pode ser acionado por job.
-   */
-  ensureCoreWebhooks(input: EnsureWebhooksInput): Promise<void>;
+  verifyWebhookHmac(input: VerifyWebhookInput): boolean;
 
-  /**
-   * Exemplo de ação “core” que depois vira automação:
-   * publicar produto.
-   */
+  ensureWebhooks(args: EnsureWebhooksArgs): Promise<EnsureWebhooksResult>;
+
   publishProduct(input: PublishProductInput): Promise<PublishProductResult>;
-
-  /**
-   * Opcional: leitura de token (útil para rotas/health).
-   * Retorna null se não existir.
-   */
-  getAccessToken?(args: { externalId: string }): Promise<AccessTokenRecord | null>;
 }
