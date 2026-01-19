@@ -1,6 +1,11 @@
 // apps/api/src/platforms/shopify/shopifyAdapter.ts
 import type { PlatformAdapter } from "../adapter";
-import type { EnsureWebhooksInput, OAuthFinalizeInput, PublishProductInput, PublishProductResult } from "../types";
+import type {
+  EnsureWebhooksInput,
+  OAuthFinalizeInput,
+  PublishProductInput,
+  PublishProductResult,
+} from "../types";
 
 import { env } from "../../env";
 import { normalizeShop, verifyWebhookHmac, finalizeInstall } from "../../integrations/shopify/oauth";
@@ -29,7 +34,6 @@ export const shopifyAdapter: PlatformAdapter = {
     await finalizeInstall({
       shop: input.externalId,
       accessToken: input.accessToken,
-      // ✅ Nosso contrato interno é "scopes" (plural)
       scopes: input.scopes ?? null,
     });
   },
@@ -73,6 +77,10 @@ export const shopifyAdapter: PlatformAdapter = {
     return {
       accessToken: token.accessToken,
       scopes: token.scopes ?? null,
+      // Não temos essas colunas/contrato no store atual.
+      // Mantemos null aqui para compatibilidade multi-plataforma sem forçar schema agora.
+      installedAt: null,
+      revokedAt: null,
     };
   },
 };
