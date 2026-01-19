@@ -1,59 +1,62 @@
 // apps/api/src/routes/shopifyWebhooks.ts
-import type { FastifyPluginAsync } from "fastify";
-import { insertWebhookEvent, updateWebhookStatusByWebhookId } from "../integrations/shopify/webhookStore";
-import { verifyWebhookHmac } from "../integrations/shopify/oauth";
+
+import { FastifyInstance } from "fastify";
 import { env } from "../env";
+import { insertWebhookEvent } from "../integrations/shopify/webhookStore";
+import { verifyWebhookHmac } from "../integrations/shopify/oauth";
 import { cleanupShopOnUninstall } from "../integrations/shopify/store";
 
-export const shopifyWebhooksRoutes: FastifyPluginAsync = async (app) => {
-  // Shopify sends POST /shopify/webhooks with headers:
-  // - x-shopify-topic
-  // - x-shopify-shop-domain
-  // - x-shopify-hmac-sha256
-  // - x-shopify-api-version
-  app.post("/shopify/webhooks", async (request, reply) => {
-    const headersLower: Record<string, string> = {};
-    for (const [k, v] of Object.entries(request.headers)) {
-      if (typeof v === "string") headersLower[k.toLowerCase()] = v;
-      else if (Array.isArray(v)) headersLower[k.toLowerCase()] = v.join(",");
+export async function shopifyWebhooksRoutes(app: FastifyInstance) {
+  // OBS: para webhook HMAC ser validável, você precisa do raw body.
+  // Se seu fastify já está setando req.rawBody via plugin/hook, ok.
+  // Aqui fazemos fallback seguro: tenta obter string de req.body se já veio como string.
+  app.post("/shopify/webhooks", async (req, reply) => {
+    const headers = req.headers as Record<string, any>;
+    const topic = String(headers["x-shopify-topic"] || "");
+    const shop = String(headers["x-shopify-shop-domain"] || "").toLowerCase();
+    const webhookId = String(headers["x-shopify-webhook-id"] || cryptoRandomId());
+    const hmac = String(headers["x-shopify-hmac-sha256"] || "");
+
+    const rawBody =
+      (req as any).rawBody ??
+      (typeof req.body === "string" ? req.body : JSON.stringify(req.body ?? {}));
+
+    // Verifica HMAC do webhook
+    const ok = verifyWebhookHmac(String(rawBody), hmac, env.SHOPIFY_CLIENT_SECRET);
+    if (!ok) {
+      await insertWebhookEvent({
+        webhook_id: webhookId,
+        shop,
+        topic,
+        status: "invalid_hmac",
+        payload: req.body ?? null,
+        payloadRaw: String(rawBody),
+        headers,
+      });
+      return reply.code(401).send({ ok: false, error: "invalid webhook hmac" });
     }
 
-    const topic = headersLower["x-shopify-topic"] || "unknown";
-    const shop = headersLower["x-shopify-shop-domain"] || "unknown";
-    const hmac = headersLower["x-shopify-hmac-sha256"];
-    const apiVersion = headersLower["x-shopify-api-version"] || null;
-    const webhookId = headersLower["x-shopify-webhook-id"] || `no-id-${Date.now()}`;
-
-    const rawBody = typeof request.body === "string" ? request.body : JSON.stringify(request.body ?? {});
-    const isValid = verifyWebhookHmac({ rawBody, hmacHeader: hmac, clientSecret: env.SHOPIFY_CLIENT_SECRET });
-
-    if (!isValid) {
-      return reply.code(401).send({ ok: false });
-    }
-
-    // Always record the webhook event as "received" first (auditing).
     await insertWebhookEvent({
-      webhookId,
+      webhook_id: webhookId,
       shop,
       topic,
-      payload: JSON.parse(rawBody),
-      payloadRaw: rawBody,
-      headers: headersLower,
-      apiVersion,
       status: "received",
+      payload: req.body ?? null,
+      payloadRaw: String(rawBody),
+      headers,
     });
 
-    // Processing (minimal): if uninstall, cleanup token + mark status
-    if (topic === "app/uninstalled") {
-      try {
-        const result = await cleanupShopOnUninstall(shop);
-        const status = result.deleted > 0 ? "uninstalled_cleanup_ok" : "uninstalled_cleanup_no_token";
-        await updateWebhookStatusByWebhookId(webhookId, status);
-      } catch (e) {
-        await updateWebhookStatusByWebhookId(webhookId, "uninstalled_cleanup_error");
-      }
+    // Se desinstalou, limpa token
+    if (topic === "app/uninstalled" && shop) {
+      const result = await cleanupShopOnUninstall(shop);
+      return reply.send({ ok: true, topic, cleanup: result });
     }
 
-    return reply.send({ ok: true });
+    return reply.send({ ok: true, topic });
   });
-};
+}
+
+function cryptoRandomId(): string {
+  // sem depender de crypto.randomUUID pra evitar qualquer ambiente antigo
+  return Math.random().toString(16).slice(2) + Date.now().toString(16);
+}

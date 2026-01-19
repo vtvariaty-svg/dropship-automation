@@ -1,3 +1,5 @@
+// apps/api/src/integrations/shopify/client.ts
+
 import { adminGraphQLEndpoint } from "./oauth";
 
 export async function shopifyGraphQL<T>(
@@ -15,10 +17,10 @@ export async function shopifyGraphQL<T>(
     body: JSON.stringify({ query, variables }),
   });
 
-  const json = await res.json();
+  const json = (await res.json()) as any;
 
-  if (!res.ok || json.errors) {
-    throw new Error(`Shopify GraphQL error: ${JSON.stringify(json)}`);
+  if (!res.ok || json?.errors) {
+    throw new Error(`Shopify GraphQL error: ${res.status} ${JSON.stringify(json)}`);
   }
 
   return json.data as T;

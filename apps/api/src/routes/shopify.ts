@@ -1,66 +1,91 @@
 // apps/api/src/routes/shopify.ts
-import type { FastifyPluginAsync } from "fastify";
-import { buildInstallUrl, exchangeCodeForToken, normalizeShop, randomState, verifyHmac } from "../integrations/shopify/oauth";
+
+import { FastifyInstance } from "fastify";
+import {
+  buildInstallUrl,
+  exchangeCodeForToken,
+  normalizeShop,
+  randomState,
+  verifyHmac,
+} from "../integrations/shopify/oauth";
+import { env } from "../env";
 import { saveShopToken } from "../integrations/shopify/store";
 
-export const shopifyRoutes: FastifyPluginAsync = async (app) => {
-  app.get("/shopify/install", async (request, reply) => {
-    const shop = normalizeShop(String((request.query as any).shop || ""));
-    const clientId = process.env.SHOPIFY_CLIENT_ID;
-    const scopes = String(process.env.SHOPIFY_SCOPES || "").trim();
-    const appUrl = String(process.env.APP_URL || "").trim();
+export async function shopifyRoutes(app: FastifyInstance) {
+  // Início OAuth
+  app.get("/shopify/install", async (req, reply) => {
+    const shop = normalizeShop(String((req.query as any).shop || ""));
+    if (!shop) return reply.code(400).send({ error: "missing shop" });
 
-    if (!shop) return reply.code(400).send({ ok: false, error: "Missing shop" });
-    if (!clientId) return reply.code(500).send({ ok: false, error: "Missing SHOPIFY_CLIENT_ID" });
-    if (!scopes) return reply.code(500).send({ ok: false, error: "Missing SHOPIFY_SCOPES" });
-    if (!appUrl) return reply.code(500).send({ ok: false, error: "Missing APP_URL" });
+    const state = randomState();
 
-    const state = randomState(16);
-    const redirectUri = `${appUrl}/shopify/callback`;
+    const redirectUri = `${env.BASE_URL}/shopify/callback`;
 
-    const url = buildInstallUrl({
+    const installUrl = buildInstallUrl({
       shop,
-      clientId,
-      scopes,
-      redirectUri,
       state,
+      redirectUri,
+      // compat: pode vir de env
+      scopes: env.SHOPIFY_SCOPES,
     });
 
-    return reply.redirect(url);
+    // Em produção, você deve salvar o state (cookie/redis). Aqui simples:
+    reply.setCookie("shopify_oauth_state", state, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: env.NODE_ENV === "production",
+      path: "/",
+      maxAge: 10 * 60, // 10 min
+    });
+
+    return reply.redirect(installUrl);
   });
 
-  app.get("/shopify/callback", async (request, reply) => {
-    const clientId = process.env.SHOPIFY_CLIENT_ID;
-    const clientSecret = process.env.SHOPIFY_CLIENT_SECRET;
+  // Callback OAuth
+  app.get("/shopify/callback", async (req, reply) => {
+    const q = req.query as any;
 
-    if (!clientId || !clientSecret) {
-      return reply.code(500).send({ ok: false, error: "Missing SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET" });
+    const shop = normalizeShop(String(q.shop || ""));
+    const code = String(q.code || "");
+    const hmac = String(q.hmac || "");
+    const state = String(q.state || "");
+    const savedState = String((req.cookies as any)?.shopify_oauth_state || "");
+
+    if (!shop || !code || !hmac) {
+      return reply.code(400).send({ error: "missing shop/code/hmac" });
     }
 
-    const query = request.query as any;
-    const shop = normalizeShop(String(query.shop || ""));
-    const code = String(query.code || "");
-    const requestedScopes = String(process.env.SHOPIFY_SCOPES || "").trim();
+    // Verifica HMAC (Shopify)
+    if (!verifyHmac(q, env.SHOPIFY_CLIENT_SECRET)) {
+      return reply.code(401).send({ error: "invalid hmac" });
+    }
 
-    if (!code) return reply.code(400).send({ ok: false, error: "Missing code" });
+    if (!savedState || state !== savedState) {
+      return reply.code(401).send({ error: "invalid state" });
+    }
 
-    const ok = verifyHmac({ query, clientSecret });
-    if (!ok) return reply.code(401).send({ ok: false, error: "Invalid OAuth HMAC" });
+    const redirectUri = `${env.BASE_URL}/shopify/callback`;
 
     const token = await exchangeCodeForToken({
       shop,
-      clientId,
-      clientSecret,
       code,
-      requestedScopes,
+      redirectUri,
     });
 
+    // compat: usa accessToken e scopes
     await saveShopToken({
       shop,
-      accessToken: token.access_token,
+      accessToken: token.accessToken,
       scopes: token.scopes,
+      scope: token.scope,
     });
 
-    return reply.send({ ok: true, shop });
+    // Você pode redirecionar para app embed (admin) depois.
+    return reply.send({
+      ok: true,
+      shop,
+      saved: true,
+      scopes: token.scopes ?? token.scope,
+    });
   });
-};
+}
