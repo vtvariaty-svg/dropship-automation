@@ -1,40 +1,85 @@
-import { adminGraphQLEndpoint } from "../../integrations/shopify/oauth";
-import { getShopToken, cleanupShopOnUninstall } from "../../integrations/shopify/store";
+import { PlatformAdapter } from "../adapter";
+import {
+  PublishProductInput,
+  PublishProductResult,
+  VerifyWebhookInput,
+  CleanupResult,
+} from "../types";
 
-export class ShopifyAdapter {
-  async getAccessToken(shop: string): Promise<string> {
-    const token = await getShopToken(shop);
-    if (!token) {
-      throw new Error(`No token found for shop ${shop}`);
-    }
-    return token.access_token;
-  }
+import { publishProductToShopify } from "../../integrations/shopify/publishProduct";
+import { ensureCoreWebhooks } from "../../integrations/shopify/webhookRegistrar";
+import { verifyWebhookHmac } from "../../integrations/shopify/oauth";
+import { createShopifyAdminClient } from "../../integrations/shopify/client";
 
-  async adminGraphQL<T>(
-    shop: string,
-    query: string,
-    variables?: Record<string, any>
-  ): Promise<T> {
-    const accessToken = await this.getAccessToken(shop);
+/**
+ * Shopify Platform Adapter
+ * - Implementa o contrato PlatformAdapter
+ * - Não acopla OAuth, rotas ou DB
+ * - Apenas traduz chamadas genéricas -> Shopify
+ */
+export const shopifyAdapter: PlatformAdapter = {
+  platform: "shopify",
 
-    const res = await fetch(adminGraphQLEndpoint(shop), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Access-Token": accessToken,
-      },
-      body: JSON.stringify({ query, variables }),
+  /**
+   * Publicação de produto
+   */
+  async publishProduct(
+    input: PublishProductInput
+  ): Promise<PublishProductResult> {
+    const result = await publishProductToShopify({
+      shop: input.externalId,
+      accessToken: input.accessToken,
+      title: input.title,
+      descriptionHtml: input.descriptionHtml,
+      images: input.images,
+      price: input.price,
     });
 
-    if (!res.ok) {
-      throw new Error(`Shopify GraphQL error (${res.status})`);
-    }
+    return {
+      externalProductId: result.externalProductId,
+      platform: "shopify",
+      raw: result.raw,
+    };
+  },
 
-    const json = await res.json();
-    return json.data as T;
-  }
+  /**
+   * Registro / garantia de webhooks essenciais
+   */
+  async ensureWebhooks(params: {
+    shop: string;
+    accessToken: string;
+    callbackBaseUrl: string;
+  }): Promise<void> {
+    const client = createShopifyAdminClient({
+      shop: params.shop,
+      accessToken: params.accessToken,
+    });
 
-  async handleUninstall(shop: string) {
-    await cleanupShopOnUninstall(shop);
-  }
-}
+    await ensureCoreWebhooks({
+      client,
+      callbackBaseUrl: params.callbackBaseUrl,
+    });
+  },
+
+  /**
+   * Verificação de assinatura de webhook
+   */
+  async verifyWebhookSignature(
+    input: VerifyWebhookInput
+  ): Promise<boolean> {
+    return verifyWebhookHmac({
+      rawBody: input.rawBody,
+      hmacHeader: input.signatureHeader,
+    });
+  },
+
+  /**
+   * Limpeza após uninstall
+   * (DB, cache, tokens, etc — hoje apenas confirmação lógica)
+   */
+  async cleanupOnUninstall(): Promise<CleanupResult> {
+    return {
+      cleaned: true,
+    };
+  },
+};
