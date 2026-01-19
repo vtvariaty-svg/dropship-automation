@@ -1,31 +1,18 @@
 import { PlatformAdapter } from "../adapter";
-import {
-  PublishProductInput,
-  PublishProductResult,
-  VerifyWebhookInput,
-  CleanupResult,
-} from "../types";
+import { PublishProductInput } from "../types";
 
 import { publishProductToShopify } from "../../integrations/shopify/publishProduct";
 import { ensureCoreWebhooks } from "../../integrations/shopify/webhookRegistrar";
-import { verifyWebhookHmac } from "../../integrations/shopify/oauth";
-import { createShopifyAdminClient } from "../../integrations/shopify/client";
+import { verifyHmac } from "../../integrations/shopify/oauth";
 
 /**
  * Shopify Platform Adapter
- * - Implementa o contrato PlatformAdapter
- * - Não acopla OAuth, rotas ou DB
- * - Apenas traduz chamadas genéricas -> Shopify
+ * Contrato REAL do projeto (alinhado ao ZIP)
  */
 export const shopifyAdapter: PlatformAdapter = {
   platform: "shopify",
 
-  /**
-   * Publicação de produto
-   */
-  async publishProduct(
-    input: PublishProductInput
-  ): Promise<PublishProductResult> {
+  async publishProduct(input: PublishProductInput) {
     const result = await publishProductToShopify({
       shop: input.externalId,
       accessToken: input.accessToken,
@@ -36,50 +23,36 @@ export const shopifyAdapter: PlatformAdapter = {
     });
 
     return {
-      externalProductId: result.externalProductId,
-      platform: "shopify",
-      raw: result.raw,
+      id: result.id,
+      handle: result.handle,
     };
   },
 
-  /**
-   * Registro / garantia de webhooks essenciais
-   */
   async ensureWebhooks(params: {
     shop: string;
     accessToken: string;
     callbackBaseUrl: string;
   }): Promise<void> {
-    const client = createShopifyAdminClient({
+    await ensureCoreWebhooks({
       shop: params.shop,
       accessToken: params.accessToken,
-    });
-
-    await ensureCoreWebhooks({
-      client,
       callbackBaseUrl: params.callbackBaseUrl,
     });
   },
 
-  /**
-   * Verificação de assinatura de webhook
-   */
-  async verifyWebhookSignature(
-    input: VerifyWebhookInput
-  ): Promise<boolean> {
-    return verifyWebhookHmac({
-      rawBody: input.rawBody,
-      hmacHeader: input.signatureHeader,
+  verifyWebhookSignature(args: {
+    rawBody: string;
+    signatureHeader: string;
+    secret: string;
+  }): boolean {
+    return verifyHmac({
+      rawBody: args.rawBody,
+      hmacHeader: args.signatureHeader,
+      secret: args.secret,
     });
   },
 
-  /**
-   * Limpeza após uninstall
-   * (DB, cache, tokens, etc — hoje apenas confirmação lógica)
-   */
-  async cleanupOnUninstall(): Promise<CleanupResult> {
-    return {
-      cleaned: true,
-    };
+  async cleanupOnUninstall(): Promise<{ cleaned: boolean }> {
+    return { cleaned: true };
   },
 };
