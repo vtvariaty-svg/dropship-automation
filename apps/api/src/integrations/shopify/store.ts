@@ -1,94 +1,64 @@
 // apps/api/src/integrations/shopify/store.ts
+// Source of truth for Shopify token persistence (Shopify phase 1).
+//
+// IMPORTANT:
+// - The active Neon schema uses table `shopify_oauth` with columns:
+//   shop (pk), access_token, scopes, installed_at
+// - We keep operations idempotent and case-insensitive on `shop`.
+
 import { pool } from "../../db/pool";
 
-/* =====================================================
-   TYPES
-===================================================== */
+export type ShopTokenRow = {
+  shop: string;
+  access_token: string;
+  scopes: string;
+  installed_at: string;
+};
 
-export type ShopToken = {
+export async function saveShopToken(args: {
   shop: string;
   accessToken: string;
   scopes: string;
-};
+}): Promise<void> {
+  const shop = args.shop.trim();
+  const scopes = String(args.scopes || "").trim();
 
-export type SaveShopTokenInput = {
-  shop: string;
-  accessToken: string;
-  scopes: string | null;
-};
+  if (!shop) throw new Error("saveShopToken: shop is required");
+  if (!args.accessToken) throw new Error("saveShopToken: accessToken is required");
+  if (!scopes) throw new Error("saveShopToken: scopes is required (non-empty)");
 
-/* =====================================================
-   READ
-===================================================== */
-
-/**
- * Carrega token ativo da shop
- * (usado por admin routes, adapters, etc)
- */
-export async function getShopToken(shop: string): Promise<ShopToken | null> {
-  const res = await pool.query(
+  await pool.query(
     `
-    select shop, access_token, scopes
+    insert into shopify_oauth (shop, access_token, scopes, installed_at)
+    values ($1, $2, $3, now())
+    on conflict (shop)
+    do update set
+      access_token = excluded.access_token,
+      scopes = excluded.scopes,
+      installed_at = now()
+    `,
+    [shop, args.accessToken, scopes]
+  );
+}
+
+export async function getShopToken(shop: string): Promise<ShopTokenRow | null> {
+  const res = await pool.query<ShopTokenRow>(
+    `
+    select shop, access_token, scopes, installed_at
     from shopify_oauth
     where lower(shop) = lower($1)
-      and access_token <> ''
     limit 1
     `,
     [shop]
   );
 
-  if (res.rowCount === 0) return null;
-
-  return {
-    shop: res.rows[0].shop,
-    accessToken: res.rows[0].access_token,
-    scopes: res.rows[0].scopes,
-  };
+  return res.rows[0] ?? null;
 }
 
-/* =====================================================
-   WRITE / UPSERT
-===================================================== */
-
-/**
- * Salva ou atualiza token OAuth
- * ⚠ scopes NUNCA pode ser NULL (constraint do DB)
- */
-export async function saveShopToken(input: SaveShopTokenInput): Promise<void> {
-  const shop = input.shop.toLowerCase().trim();
-  const accessToken = String(input.accessToken);
-  const scopes = (input.scopes ?? "").trim(); // NOT NULL safeguard
-
-  await pool.query(
-    `
-    insert into shopify_oauth (shop, access_token, scopes, installed_at, updated_at)
-    values ($1, $2, $3, now(), now())
-    on conflict (shop)
-    do update set
-      access_token = excluded.access_token,
-      scopes = excluded.scopes,
-      updated_at = now()
-    `,
-    [shop, accessToken, scopes]
-  );
-}
-
-/* =====================================================
-   UNINSTALL / CLEANUP
-===================================================== */
-
-/**
- * Limpa token quando app é desinstalado
- * (idempotente)
- */
-export async function cleanupShopOnUninstall(shop: string): Promise<void> {
-  await pool.query(
-    `
-    update shopify_oauth
-    set access_token = '',
-        updated_at = now()
-    where lower(shop) = lower($1)
-    `,
-    [shop]
-  );
+// Called on `app/uninstalled` webhook.
+// We delete the record so the shop is effectively "revoked".
+// Idempotent: if it doesn't exist, returns deleted=0.
+export async function cleanupShopOnUninstall(shop: string): Promise<{ deleted: number }> {
+  const res = await pool.query(`delete from shopify_oauth where lower(shop) = lower($1)`, [shop]);
+  return { deleted: res.rowCount ?? 0 };
 }
