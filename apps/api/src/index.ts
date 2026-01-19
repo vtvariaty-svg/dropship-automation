@@ -1,41 +1,42 @@
-// apps/api/src/index.ts
 import Fastify from "fastify";
+import cookie from "@fastify/cookie";
 
-import shopContextPlugin from "./plugins/shopContextPlugin";
-
-import { rootRoutes } from "./routes/root";
+import { env } from "./env";
 import { shopifyRoutes } from "./routes/shopify";
 import { shopifyWebhooksRoutes } from "./routes/shopifyWebhooks";
-import { shopifyAdminRoutes } from "./routes/shopifyAdmin";
+import { adminRoutes } from "./routes/admin";
+import { statusRoutes } from "./routes/status";
 
-async function bootstrap() {
-  const app = Fastify({ logger: true });
+const app = Fastify({
+  logger: true,
+});
 
-  // Plugin que injeta req.shopDomain (header/query)
-  await app.register(shopContextPlugin);
+// Necessário para req.cookies / reply.setCookie tipado
+app.register(cookie, {
+  secret: env.COOKIE_SECRET ?? "dev-cookie-secret",
+});
 
-  // Rotas básicas
-  await app.register(rootRoutes);
+// Rotas
+app.register(statusRoutes);
+app.register(shopifyRoutes, { prefix: "/shopify" });
+app.register(shopifyWebhooksRoutes, { prefix: "/shopify/webhooks" });
+app.register(adminRoutes, { prefix: "/admin" });
 
-  // IMPORTANTÍSSIMO:
-  // Webhooks antes de qualquer plugin/rota que consuma o body de forma diferente,
-  // pra manter o rawBody correto (HMAC).
-  await app.register(shopifyWebhooksRoutes);
+app.get("/", async () => {
+  return {
+    ok: true,
+    app: "CliqueBuy Automation",
+    status: "running",
+    message: "Shopify app installed and backend is responding",
+    timestamp: new Date().toISOString(),
+  };
+});
 
-  // OAuth / install / callback
-  await app.register(shopifyRoutes);
+// Observação: se você quiser /health, crie explicitamente:
+app.get("/health", async () => ({ ok: true }));
 
-  // Admin endpoints (GraphQL/REST via token)
-  await app.register(shopifyAdminRoutes);
-
-  const port = Number(process.env.PORT ?? 3000);
-  const host = "0.0.0.0";
-
-  await app.listen({ port, host });
-}
-
-bootstrap().catch((err) => {
-  // garante saída com erro em ambiente de deploy
-  console.error(err);
+const port = env.PORT ?? 3000;
+app.listen({ port, host: "0.0.0.0" }).catch((err) => {
+  app.log.error(err);
   process.exit(1);
 });
