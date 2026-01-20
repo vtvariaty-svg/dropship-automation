@@ -1,15 +1,22 @@
 // apps/api/src/routes/shopifyProducts.ts
-import type { FastifyInstance } from "fastify";
+import { FastifyPluginAsync } from "fastify";
 import { getShopToken } from "../integrations/shopify/store";
-import { fetchShopifyProducts } from "../integrations/shopify/products";
+import { shopifyGraphQL } from "../integrations/shopify/client";
 
-export async function shopifyProductsRoutes(app: FastifyInstance) {
+type ShopifyProductNode = {
+  id: string;
+  title: string;
+  handle: string;
+  status: string;
+  vendor?: string;
+};
+
+export const shopifyProductsRoutes: FastifyPluginAsync = async (app) => {
   app.get("/shopify/products", async (request, reply) => {
-    const q = request.query as any;
-    const shop = q?.shop as string | undefined;
+    const shop = String((request.query as any)?.shop || "").trim();
 
     if (!shop) {
-      return reply.status(400).send({
+      return reply.code(400).send({
         ok: false,
         error: "Missing required query param: shop",
       });
@@ -17,15 +24,35 @@ export async function shopifyProductsRoutes(app: FastifyInstance) {
 
     const tokenRow = await getShopToken(shop);
 
-    if (!tokenRow || !tokenRow.access_token) {
-      return reply.status(404).send({
+    if (!tokenRow?.access_token) {
+      return reply.code(404).send({
         ok: false,
         error: "Shop not authenticated",
       });
     }
 
     try {
-      const products = await fetchShopifyProducts(shop, tokenRow.access_token);
+      const query = `
+        query Products($first: Int!) {
+          products(first: $first) {
+            edges {
+              node {
+                id
+                title
+                handle
+                status
+                vendor
+              }
+            }
+          }
+        }
+      `;
+
+      const data = await shopifyGraphQL<{
+        products: { edges: Array<{ node: ShopifyProductNode }> };
+      }>(shop, tokenRow.access_token, query, { first: 20 });
+
+      const products = data.products.edges.map((e) => e.node);
 
       return reply.send({
         ok: true,
@@ -36,20 +63,13 @@ export async function shopifyProductsRoutes(app: FastifyInstance) {
     } catch (err: any) {
       const msg = String(err?.message || err);
 
-      // Mantém simples e claro (sem “adivinhar” demais)
-      if (msg.includes("401") || msg.includes("403")) {
-        return reply.status(401).send({
-          ok: false,
-          error: "Unauthorized Shopify Admin API request",
-          details: msg,
-        });
-      }
-
-      return reply.status(500).send({
+      // shopifyGraphQL já lança erro com payload do GraphQL,
+      // aqui só retornamos claro para debug.
+      return reply.code(500).send({
         ok: false,
-        error: "Failed to fetch products",
+        error: "Failed to fetch products from Shopify Admin API",
         details: msg,
       });
     }
   });
-}
+};
