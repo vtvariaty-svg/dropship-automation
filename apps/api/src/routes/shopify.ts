@@ -2,6 +2,8 @@
 import { FastifyPluginAsync } from "fastify";
 import { ShopifyAdapter } from "../platforms/shopify/shopifyAdapter";
 import { saveShopToken } from "../integrations/shopify/store";
+import { FastifyInstance } from "fastify";
+import { shopifyProductsRoutes } from "./shopifyProducts";
 
 export const shopifyRoutes: FastifyPluginAsync = async (app) => {
   const adapter = new ShopifyAdapter();
@@ -64,6 +66,9 @@ export const shopifyRoutes: FastifyPluginAsync = async (app) => {
       scopes: token.scopes,
     });
 
+    
+    await app.register(shopifyProductsRoutes);
+    
     // opcional: registrar webhooks automaticamente após install
     const webhookUrlBase = process.env.WEBHOOK_URL_BASE || appUrl;
     await adapter.ensureWebhooks({
@@ -72,6 +77,10 @@ export const shopifyRoutes: FastifyPluginAsync = async (app) => {
       webhookUrlBase,
     });
 
+    
+
     return reply.send({ ok: true, shop });
   });
+
+  
 };
