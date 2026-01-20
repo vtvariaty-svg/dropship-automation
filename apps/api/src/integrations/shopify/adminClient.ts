@@ -49,7 +49,6 @@ export class ShopifyAdminClient {
     try {
       json = JSON.parse(text);
     } catch {
-      // se não for JSON, estoura como erro útil
       throw new Error(
         `Shopify GraphQL non-JSON response (${res.status}): ${text.slice(0, 300)}`
       );
@@ -58,19 +57,13 @@ export class ShopifyAdminClient {
     return json as ShopifyGraphQLResponse<T>;
   }
 
-  // REST helper (pra evitar erro "rest does not exist")
   async rest<T = unknown>(
     method: "GET" | "POST" | "PUT" | "DELETE",
     path: string,
     body?: unknown
   ): Promise<{ status: number; data: T; raw: string }> {
-    // path pode vir com ou sem /, com ou sem .json
-    const normalized =
-      path.startsWith("/") ? path : `/${path}`;
-    const finalPath = normalized.endsWith(".json")
-      ? normalized
-      : `${normalized}.json`;
-
+    const normalized = path.startsWith("/") ? path : `/${path}`;
+    const finalPath = normalized.endsWith(".json") ? normalized : `${normalized}.json`;
     const url = `${this.adminRestBase()}${finalPath}`;
 
     const res = await fetch(url, {
@@ -94,7 +87,6 @@ export class ShopifyAdminClient {
   }
 }
 
-// compat: alguns lugares podem chamar createAdminClient()
 export function createAdminClient(init: ShopifyAdminClientInit): ShopifyAdminClient {
   return new ShopifyAdminClient(init);
 }
